@@ -16,6 +16,14 @@ import db
 st.set_page_config(page_title="ESPACE VIRTUELLE MINIÈRE DE SMC", layout="wide", page_icon="⛏️")
 db.init_db()
 
+
+def safe_concat(keys):
+    """Concatène les DataFrames non vides de st.session_state.data pour les clés données.
+    Retourne un DataFrame vide (sans erreur) si aucune donnée n'est disponible — évite le
+    ValueError de pandas ('No objects to concatenate') quand rien n'est encore chargé."""
+    dfs = [st.session_state.data[k] for k in keys if not st.session_state.data[k].empty]
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
 def _fresh_project_state():
     return {
         "data": {"RC": pd.DataFrame(), "AC": pd.DataFrame(), "DD": pd.DataFrame(),
@@ -340,8 +348,7 @@ elif page == "📐 Sections géologiques":
 
     drill_types = st.multiselect("Types de sondage à inclure dans la section",
                                   ["RC", "AC", "DD"], default=["RC", "AC", "DD"])
-    all_df = pd.concat([st.session_state.data[d] for d in drill_types if not st.session_state.data[d].empty],
-                        ignore_index=True) if drill_types else pd.DataFrame()
+    all_df = safe_concat(drill_types)
 
     if all_df.empty:
         st.info("Aucune donnée disponible. Importez d'abord des fichiers RC/AC/DD.")
@@ -461,8 +468,7 @@ elif page == "🗺️ Cartes (lithologie / structurale / anomalie)":
     st.subheader("🗺️ Cartes du prospect")
     tab_litho, tab_struct, tab_anom = st.tabs(["🎨 Carte lithologie", "🧱 Carte structurale", "🔥 Carte d'anomalie"])
 
-    all_df = pd.concat([st.session_state.data[k] for k in ["RC", "AC", "DD"] if not st.session_state.data[k].empty],
-                        ignore_index=True) if any(not st.session_state.data[k].empty for k in ["RC", "AC", "DD"]) else pd.DataFrame()
+    all_df = safe_concat(["RC", "AC", "DD"])
 
     # ---------------- CARTE LITHOLOGIE ----------------
     with tab_litho:
@@ -656,8 +662,7 @@ elif page == "🧭 Graphiques structuraux":
 elif page == "🧊 Modèle 3D":
     st.subheader("🧊 Modèle 3D des trous de forage")
     drill_types = st.multiselect("Types de sondage", ["RC", "AC", "DD"], default=["RC", "AC", "DD"], key="m3d_types")
-    all_df = pd.concat([st.session_state.data[d] for d in drill_types if not st.session_state.data[d].empty],
-                        ignore_index=True) if drill_types else pd.DataFrame()
+    all_df = safe_concat(drill_types)
     sdf = st.session_state.data["STRUCT"]
 
     if all_df.empty:
@@ -905,8 +910,7 @@ elif page == "🪨 SGI & Structures":
     st.subheader("🪨 Indice de qualité du massif (GSI) & synthèse structurale")
     sdf = st.session_state.data["STRUCT"]
     auger = st.session_state.data["AUGER"]
-    all_df = pd.concat([st.session_state.data[k] for k in ["RC", "AC", "DD"] if not st.session_state.data[k].empty],
-                        ignore_index=True) if any(not st.session_state.data[k].empty for k in ["RC", "AC", "DD"]) else pd.DataFrame()
+    all_df = safe_concat(["RC", "AC", "DD"])
 
     tab_gsi, tab_struct_table = st.tabs(["🪨 Tableau GSI / SGI vs Minéralisation & teneur", "🧭 Tableau directions / pendages / sens de pendage"])
 
@@ -1028,8 +1032,7 @@ elif page == "📦 Ressources & Réserves (JORC simplifié)":
                "krigeage) et un audit indépendant.")
 
     auger = st.session_state.data["AUGER"]
-    all_df = pd.concat([st.session_state.data[k] for k in ["RC", "AC", "DD"] if not st.session_state.data[k].empty],
-                        ignore_index=True) if any(not st.session_state.data[k].empty for k in ["RC", "AC", "DD"]) else pd.DataFrame()
+    all_df = safe_concat(["RC", "AC", "DD"])
 
     source = st.radio("Source des teneurs", ["Auger / sols (Au_ppb)", "Fichier d'assays externe"], horizontal=True)
     grade_df = pd.DataFrame()
@@ -1413,8 +1416,7 @@ elif page == "📐 Sections par orientation de forage":
              "**slow drilling / subhorizontal** (<30°, corrélation lente).")
 
     drill_types = st.multiselect("Types de sondage", ["RC", "AC", "DD"], default=["RC", "AC", "DD"], key="orient_types")
-    all_df = pd.concat([st.session_state.data[d] for d in drill_types if not st.session_state.data[d].empty],
-                        ignore_index=True) if drill_types else pd.DataFrame()
+    all_df = safe_concat(drill_types)
     sdf = st.session_state.data["STRUCT"]
 
     if all_df.empty:
@@ -1515,8 +1517,7 @@ elif page == "📊 Synthèse / Collars":
 
 
     st.subheader("📊 Synthèse des collars et statistiques")
-    all_df = pd.concat([st.session_state.data[k] for k in ["RC", "AC", "DD"] if not st.session_state.data[k].empty],
-                        ignore_index=True)
+    all_df = safe_concat(["RC", "AC", "DD"])
     if all_df.empty:
         st.info("Aucune donnée chargée.")
     else:
