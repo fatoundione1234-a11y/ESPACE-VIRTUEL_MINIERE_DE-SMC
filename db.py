@@ -19,6 +19,42 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smc_dashboar
 _lock = threading.Lock()
 
 
+def db_stats(path=DB_PATH):
+    """Retourne, pour chaque prospect stocké, sa date de dernière sauvegarde et la taille
+    (en octets) de son état sérialisé — pour affichage dans l'onglet Base de données centrale."""
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute(
+            "SELECT project, updated_at, LENGTH(state) FROM project_state ORDER BY project"
+        ).fetchall()
+    return [{"Prospect": r[0], "Derniere_sauvegarde": r[1], "Taille_octets": r[2]} for r in rows]
+
+
+def get_db_file_bytes(path=DB_PATH):
+    if not os.path.exists(path):
+        return b""
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def restore_db_file(file_bytes, path=DB_PATH):
+    with _lock:
+        with open(path, "wb") as f:
+            f.write(file_bytes)
+
+
+def collar_count(project, path=DB_PATH):
+    """Compte rapide du nombre de trous (RC/AC/DD) pour un prospect, sans tout recharger côté app."""
+    state = load_project_state(project, path)
+    if not state:
+        return 0
+    total = 0
+    for k in ["RC", "AC", "DD"]:
+        df = state.get("data", {}).get(k)
+        if df is not None and not df.empty and "Sondage" in df.columns:
+            total += df["Sondage"].nunique()
+    return total
+
+
 def init_db(path=DB_PATH):
     with sqlite3.connect(path) as conn:
         conn.execute("""

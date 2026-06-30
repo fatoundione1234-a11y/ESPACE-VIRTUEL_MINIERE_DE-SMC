@@ -151,7 +151,7 @@ page = st.sidebar.radio(
      "📦 Ressources & Réserves (JORC simplifié)", "💵 Budget & Coûts", "🔗 Gestion des échantillons",
      "⚗️ Métallurgie", "🦺 Environnement & HSE", "📜 SOP", "🛡️ Admin", "🤖 Audit automatique des données",
      "📄 Rapport géologique", "🗄️ Documents", "💬 Commentaires & Réponses",
-     "📐 Sections par orientation de forage",
+     "📐 Sections par orientation de forage", "🗃️ Base de données centrale",
      "📊 Synthèse / Collars"],
 )
 
@@ -1512,6 +1512,57 @@ elif page == "📐 Sections par orientation de forage":
                              "Les trous subverticaux donnent une image directe de l'empilement stratigraphique "
                              "mais peuvent sous-échantillonner les structures à fort pendage parallèles au "
                              "forage."))
+
+elif page == "🗃️ Base de données centrale":
+    st.subheader("🗃️ Base de données centrale")
+    st.write("Vue d'ensemble de **tous les prospects sauvegardés** dans le fichier local "
+             "`smc_dashboard.db` (SQLite) — c'est ici que vivent réellement vos données entre deux "
+             "sessions.")
+
+    if st.button("🔄 Rafraîchir"):
+        st.rerun()
+
+    stats = db.db_stats()
+    if not stats:
+        st.info("Aucun prospect sauvegardé pour l'instant.")
+    else:
+        for s in stats:
+            s["Nb_trous_RC_AC_DD"] = db.collar_count(s["Prospect"])
+            s["Taille_Ko"] = round(s["Taille_octets"] / 1024, 1)
+        sdf_db = pd.DataFrame(stats)[["Prospect", "Nb_trous_RC_AC_DD", "Taille_Ko", "Derniere_sauvegarde"]]
+        st.dataframe(sdf_db, use_container_width=True)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Prospects enregistrés", len(stats))
+        c2.metric("Total trous (tous prospects)", int(sdf_db["Nb_trous_RC_AC_DD"].sum()))
+        c3.metric("Taille totale base", f"{sdf_db['Taille_Ko'].sum():.0f} Ko")
+
+        fig = go.Figure(go.Bar(x=sdf_db["Prospect"], y=sdf_db["Nb_trous_RC_AC_DD"], marker_color="#1B4F72"))
+        fig.update_layout(title="Nombre de trous par prospect", height=350)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("#### 💾 Sauvegarde / Restauration complète")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("**Télécharger une copie de sauvegarde** de toute la base (tous prospects inclus).")
+        db_bytes = db.get_db_file_bytes()
+        st.download_button("📥 Télécharger smc_dashboard.db", db_bytes, "smc_dashboard_backup.db",
+                            "application/octet-stream", disabled=(len(db_bytes) == 0))
+    with col2:
+        st.write("**Restaurer** depuis un fichier .db précédemment téléchargé (⚠️ remplace toute la base actuelle).")
+        f_restore = st.file_uploader("Fichier .db à restaurer", type=["db"], key="db_restore_up")
+        if f_restore and st.button("⚠️ Restaurer (remplace tout)"):
+            db.restore_db_file(f_restore.read())
+            st.success("Base restaurée. Rechargement...")
+            _load_project(st.session_state.active_project if st.session_state.active_project in db.list_projects() else db.list_projects()[0])
+            st.rerun()
+
+    st.info("🧠 **Pourquoi cet onglet ?** La persistance fonctionne déjà automatiquement en arrière-plan "
+            "(chaque action sauvegarde le prospect actif). Cet onglet la rend simplement **visible et "
+            "manipulable** : vérifier ce qui est stocké, exporter une copie de sécurité régulièrement "
+            "(recommandé avant tout redéploiement sur un hébergement cloud éphémère), ou restaurer une "
+            "sauvegarde antérieure en cas de problème.")
 
 elif page == "📊 Synthèse / Collars":
 
