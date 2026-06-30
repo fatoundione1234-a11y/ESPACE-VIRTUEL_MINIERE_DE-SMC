@@ -591,3 +591,5 @@ def collar_table(df, depth_col_candidates=("To", "To_m")):
         g["Profondeur_totale"] = df.groupby("Sondage")[depth_col].max()
     g = g.reset_index()
     return g
+    
+
