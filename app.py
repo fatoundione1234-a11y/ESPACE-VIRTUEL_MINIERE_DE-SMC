@@ -3,12 +3,14 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import io
+import uuid
+import re as _re
 
 from parsers import (
     parse_geologie_workbook, parse_auger_workbook, parse_structural_workbook,
     collar_table, build_litho_color_map, LITHO_PALETTE, WEATHERING_COLORS, generate_demo_data,
     hole_trajectory, length_weighted_grade, audit_dataframe, auto_fix_dataframe,
-    generate_geological_report, report_to_markdown,
+    generate_geological_report, report_to_markdown, parse_survey_dataframe, build_survey_trajectory,
 )
 from pdf_report import build_pdf_report
 import db
@@ -27,7 +29,7 @@ def safe_concat(keys):
 def _fresh_project_state():
     return {
         "data": {"RC": pd.DataFrame(), "AC": pd.DataFrame(), "DD": pd.DataFrame(),
-                 "AUGER": pd.DataFrame(), "STRUCT": pd.DataFrame()},
+                 "AUGER": pd.DataFrame(), "STRUCT": pd.DataFrame(), "SURVEY": pd.DataFrame()},
         "litho_colors": {},
         "planning": pd.DataFrame(columns=[
             "Trou_ID", "Type", "Ligne", "Easting", "Northing", "Elevation",
@@ -57,12 +59,13 @@ def _fresh_project_state():
         ]),
         "documents": [],
         "comments": [],
+        "meetings": [],
         "permis": "",
     }
 
 
 LIVE_KEYS = ["data", "litho_colors", "planning", "budget", "samples", "metallurgie", "hse", "admin",
-             "documents", "comments", "permis"]
+             "documents", "comments", "meetings", "permis"]
 
 
 def _save_active_to_db():
@@ -75,8 +78,14 @@ def _load_project(name):
     if state is None:
         state = _fresh_project_state()
         db.save_project_state(name, state)
+    fresh = _fresh_project_state()
     for k in LIVE_KEYS:
-        st.session_state[k] = state.get(k, _fresh_project_state()[k])
+        st.session_state[k] = state.get(k, fresh[k])
+    # rétro-compatibilité : compléter les sous-clés de "data" qui auraient été ajoutées
+    # après la sauvegarde d'un ancien prospect (ex: nouvelle source de données SURVEY)
+    for sub_key, empty_df in fresh["data"].items():
+        if sub_key not in st.session_state["data"]:
+            st.session_state["data"][sub_key] = empty_df
 
 
 if "active_project" not in st.session_state:
@@ -151,7 +160,8 @@ page = st.sidebar.radio(
      "📦 Ressources & Réserves (JORC simplifié)", "💵 Budget & Coûts", "🔗 Gestion des échantillons",
      "⚗️ Métallurgie", "🦺 Environnement & HSE", "📜 SOP", "🛡️ Admin", "🤖 Audit automatique des données",
      "📄 Rapport géologique", "🗄️ Documents", "💬 Commentaires & Réponses",
-     "📐 Sections par orientation de forage", "🗃️ Base de données centrale",
+     "📐 Sections par orientation de forage", "🗃️ Base de données centrale", "📹 Réunion live",
+     "🛰️ Survey (déviomètre)",
      "📊 Synthèse / Collars"],
 )
 
@@ -1563,6 +1573,142 @@ elif page == "🗃️ Base de données centrale":
             "manipulable** : vérifier ce qui est stocké, exporter une copie de sécurité régulièrement "
             "(recommandé avant tout redéploiement sur un hébergement cloud éphémère), ou restaurer une "
             "sauvegarde antérieure en cas de problème.")
+
+elif page == "📹 Réunion live":
+    st.subheader("📹 Réunion live — géologues & équipe terrain")
+    st.write("Génère un lien de réunion vidéo instantané (via **Jitsi Meet**, gratuit, sans compte ni "
+             "installation) pour faire le point entre géologues de terrain et de bureau. Le lien est "
+             "valable immédiatement pour quiconque le reçoit.")
+
+    def _slugify(text):
+        text = _re.sub(r"[^a-zA-Z0-9]+", "-", text or "prospect").strip("-")
+        return text or "prospect"
+
+    with st.form("new_meeting_form", clear_on_submit=True):
+        titre = st.text_input("Titre de la réunion", value=f"Point géologie — {prospect}")
+        organisateur = st.text_input("Organisateur")
+        submitted = st.form_submit_button("🎥 Créer le lien de réunion")
+        if submitted:
+            room_id = f"{_slugify(prospect)}-{uuid.uuid4().hex[:8]}"
+            link = f"https://meet.jit.si/{room_id}"
+            st.session_state.meetings.append({
+                "titre": titre or "Réunion", "organisateur": organisateur or "Anonyme",
+                "lien": link, "date_creation": str(pd.Timestamp.now()), "statut": "Active",
+            })
+            st.rerun()
+
+    meetings = st.session_state.meetings
+    if not meetings:
+        st.info("Aucune réunion créée pour l'instant. Remplissez le formulaire ci-dessus pour générer un lien.")
+    else:
+        st.markdown("#### 📋 Réunions de ce prospect")
+        for i, m in enumerate(reversed(meetings)):
+            idx = len(meetings) - 1 - i
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([3, 2, 1])
+                c1.markdown(f"**{m['titre']}**  \nOrganisé par {m['organisateur']} — {m['date_creation'][:16]}")
+                c2.code(m["lien"], language=None)
+                with c3:
+                    st.link_button("🔗 Rejoindre", m["lien"])
+                if st.button("🗑️ Supprimer", key=f"del_meet_{idx}"):
+                    st.session_state.meetings.pop(idx)
+                    st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### 🖥️ Rejoindre directement ici (intégré)")
+        choix = st.selectbox("Choisir la réunion à afficher", [m["titre"] for m in meetings],
+                              index=len(meetings) - 1)
+        selected = next(m for m in meetings if m["titre"] == choix)
+        if hasattr(st, "iframe"):
+            st.iframe(selected["lien"], height=600)
+        else:
+            st.components.v1.iframe(selected["lien"], height=600)
+        st.caption("Si la vidéo ne s'affiche pas (bloquée par votre navigateur ou pare-feu d'entreprise), "
+                   "utilisez plutôt le bouton '🔗 Rejoindre' ci-dessus pour ouvrir Jitsi Meet dans un nouvel onglet.")
+
+    st.info("🧠 Jitsi Meet est un service tiers gratuit et open-source — aucune donnée du dashboard "
+            "n'y transite, seul le lien est généré ici. Pour une solution intégrée à votre Google "
+            "Workspace ou Microsoft 365 existant, on peut aussi générer des liens Google Meet/Teams si "
+            "vous me donnez accès aux connecteurs correspondants.")
+
+elif page == "🛰️ Survey (déviomètre)":
+    st.subheader("🛰️ Survey — relevés réels de déviation")
+    st.write("Contrairement à l'onglet '🎯 Simulation déviation' (qui projette un scénario théorique), "
+             "ici vous chargez les **vrais relevés de déviomètre** (gyroscopique ou magnétique) mesurés "
+             "en forage : plusieurs stations Profondeur/Azimut/Pendage par trou. Le dashboard reconstitue "
+             "la trajectoire réelle par la méthode tangentielle équilibrée (désurvey).")
+
+    f_survey = st.file_uploader("Fichier de survey (xlsx/csv) — colonnes libres, vous les mappez ci-dessous",
+                                 type=["xlsx", "csv"], key="survey_up")
+    if f_survey:
+        raw = pd.read_csv(f_survey) if f_survey.name.endswith(".csv") else pd.read_excel(f_survey)
+        st.dataframe(raw.head(20), use_container_width=True)
+        cols = raw.columns.tolist()
+        c1, c2, c3, c4 = st.columns(4)
+        hole_col = c1.selectbox("Colonne Sondage", cols, index=0, key="srv_h")
+        depth_col = c2.selectbox("Colonne Profondeur", cols, index=min(1, len(cols) - 1), key="srv_d")
+        az_col = c3.selectbox("Colonne Azimut", cols, index=min(2, len(cols) - 1), key="srv_a")
+        dip_col = c4.selectbox("Colonne Pendage/Inclinaison", cols, index=min(3, len(cols) - 1), key="srv_p")
+        if st.button("📥 Importer ce survey", type="primary"):
+            std = parse_survey_dataframe(raw, hole_col, depth_col, az_col, dip_col)
+            existing = st.session_state.data.get("SURVEY", pd.DataFrame())
+            st.session_state.data["SURVEY"] = pd.concat([existing, std], ignore_index=True).drop_duplicates()
+            st.success(f"{len(std)} station(s) de survey importée(s) pour "
+                       f"{std['Sondage'].nunique()} trou(s).")
+
+    survey_df = st.session_state.data.get("SURVEY", pd.DataFrame())
+    if survey_df.empty:
+        st.info("Aucun survey chargé pour l'instant. Uploadez un fichier ci-dessus (colonnes : Sondage, "
+                "Profondeur, Azimut, Pendage — peu importe leurs noms d'origine, vous les associez "
+                "juste au-dessus).")
+    else:
+        st.markdown("#### 📋 Stations de survey chargées")
+        st.dataframe(survey_df, use_container_width=True, height=300)
+
+        all_df = safe_concat(["RC", "AC", "DD"])
+        collars = collar_table(all_df).dropna(subset=["Easting", "Northing"]) if not all_df.empty else pd.DataFrame()
+
+        holes = sorted(survey_df["Sondage"].dropna().unique().tolist())
+        hole = st.selectbox("Trou à visualiser", holes)
+        hs = survey_df[survey_df["Sondage"] == hole]
+
+        crow = collars[collars["Sondage"] == hole] if not collars.empty else pd.DataFrame()
+        if not crow.empty:
+            ce, cn, cz = crow.iloc[0]["Easting"], crow.iloc[0]["Northing"], crow.iloc[0]["Elevation"]
+        else:
+            st.warning(f"Collar inconnu pour {hole} (non trouvé dans RC/AC/DD) — utilisation de (0,0,0) "
+                       "comme origine, seule la forme de la trajectoire est donc fiable, pas sa position absolue.")
+            ce, cn, cz = 0.0, 0.0, 0.0
+
+        traj = build_survey_trajectory(hs, ce, cn, cz)
+        if traj.empty:
+            st.warning("Impossible de calculer la trajectoire (données insuffisantes).")
+        else:
+            fig = go.Figure(go.Scatter3d(x=traj["Easting"], y=traj["Northing"], z=traj["Elevation"],
+                                          mode="lines+markers", line=dict(color="#1B4F72", width=6),
+                                          marker=dict(size=4, color=traj["Depth"], colorscale="Viridis",
+                                                      colorbar=dict(title="Profondeur (m)"))))
+            fig.update_layout(height=650, title=f"Trajectoire réelle (survey) — {hole}",
+                               scene=dict(xaxis_title="Easting", yaxis_title="Northing",
+                                          zaxis_title="Élévation (m)", aspectmode="data"))
+            st.plotly_chart(fig, use_container_width=True)
+
+            ecart_horizontal = np.sqrt((traj["Easting"].iloc[-1] - traj["Easting"].iloc[0]) ** 2 +
+                                        (traj["Northing"].iloc[-1] - traj["Northing"].iloc[0]) ** 2)
+            prof_finale = traj["Depth"].iloc[-1]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Profondeur surveyée", f"{prof_finale:.0f} m")
+            c2.metric("Déport horizontal total", f"{ecart_horizontal:.1f} m")
+            c3.metric("Nb stations", len(hs))
+
+            st.info(f"🧠 **Interprétation** : sur {prof_finale:.0f} m forés, le trou **{hole}** présente un "
+                    f"déport horizontal cumulé de **{ecart_horizontal:.1f} m** par rapport à son point de "
+                    f"départ (collar). " +
+                    ("Ce déport est important — comparez-le à la position de la cible géologique visée : "
+                     "le trou pourrait avoir manqué sa cible en profondeur." if ecart_horizontal > prof_finale * 0.15 else
+                     "Ce déport reste dans une fourchette normale pour ce type de forage.") +
+                    " Ces données de survey réelles doivent désormais remplacer les hypothèses utilisées "
+                    "dans le Modèle 3D et les Sections par orientation pour ce trou.")
 
 elif page == "📊 Synthèse / Collars":
 
