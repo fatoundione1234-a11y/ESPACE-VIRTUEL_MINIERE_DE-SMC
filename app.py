@@ -11,12 +11,16 @@ from parsers import (
     collar_table, build_litho_color_map, LITHO_PALETTE, WEATHERING_COLORS, generate_demo_data,
     hole_trajectory, length_weighted_grade, audit_dataframe, auto_fix_dataframe,
     generate_geological_report, report_to_markdown, parse_survey_dataframe, build_survey_trajectory,
-    collect_notifications,
+    collect_notifications, utm_to_latlon, experimental_variogram, fit_spherical_variogram, ordinary_kriging,
 )
 from pdf_report import build_pdf_report
 import db
 from translations import t_nav, t_ui, DASHBOARD_TITLE, DASHBOARD_SUBTITLE
 from roster import ROLE_GROUPS
+import folium
+from streamlit_folium import st_folium
+import requests
+import json as _json
 
 st.set_page_config(page_title="ESPACE VIRTUELLE MINIÈRE DE SMC", layout="wide", page_icon="⛏️")
 db.init_db()
@@ -288,6 +292,8 @@ page = st.sidebar.radio(
      "📐 Sections par orientation de forage", "🗃️ Base de données centrale", "📹 Réunion live",
      "🛰️ Survey (déviomètre)", "🔔 Notifications", "📧 Envoi Email",
      "👤 Utilisateurs", "🔑 Mon compte",
+     "🗺️ Carte interactive", "📈 KPIs exécutif", "🎓 Formation / Guide",
+     "🔗 API Laboratoire", "🤖 Assistant IA", "🎨 Apparence", "⛰️ Topographie", "🌍 Géomatique", "📑 Modèles Excel",
      "📊 Synthèse / Collars"],
     format_func=lambda label: t_nav(label, lang),
 )
@@ -1224,6 +1230,87 @@ elif page == "📦 Ressources & Réserves (JORC simplifié)":
                 f"resserrer le maillage de forage (infill) réduira l'incertitude et permettra d'évoluer vers "
                 f"une catégorie Indiqué/Mesuré avec une étude géostatistique complète.")
 
+    st.markdown("---")
+    st.markdown("### 🧮 Variogramme & Krigeage ordinaire")
+    st.warning("⚠️ Un variogramme fiable nécessite généralement **30+ points** répartis de façon "
+               "représentative. Avec moins de points, le résultat est illustratif — utile pour "
+               "comprendre la méthode, pas pour classer des ressources.")
+
+    if not grade_df.empty:
+        if source.startswith("Auger") and not auger.empty:
+            collars_v = collar_table(auger).dropna(subset=["Easting", "Northing"])
+        else:
+            collars_v = collar_table(all_df).dropna(subset=["Easting", "Northing"]) if not all_df.empty else pd.DataFrame()
+        vgrade = grade_df.merge(collars_v[["Sondage", "Easting", "Northing"]], on="Sondage", how="inner").dropna(subset=["Easting", "Northing", "Teneur_moy_g_t"]) if not collars_v.empty else pd.DataFrame()
+        if len(vgrade) < 4:
+            st.info(f"Seulement {len(vgrade)} point(s) géoréférencé(s) avec teneur disponible — "
+                    f"minimum 4 requis pour calculer un variogramme.")
+        else:
+            n_lags = st.slider("Nombre de classes de distance (lags)", 4, 15, 8)
+            vdf, maxd = experimental_variogram(vgrade["Easting"].values, vgrade["Northing"].values,
+                                                vgrade["Teneur_moy_g_t"].values, n_lags=n_lags)
+            if vdf.empty:
+                st.info("Pas assez de paires de points pour calculer le variogramme.")
+            else:
+                params = fit_spherical_variogram(vdf)
+                fig_v = go.Figure()
+                fig_v.add_trace(go.Scatter(x=vdf["Distance"], y=vdf["Semi_variance"], mode="markers",
+                                            marker=dict(size=vdf["N_paires"] / vdf["N_paires"].max() * 20 + 5, color="#1B4F72"),
+                                            name="Variogramme expérimental"))
+                d_smooth = np.linspace(0, vdf["Distance"].max(), 100)
+                g_smooth = np.where(d_smooth <= params["range"],
+                                     params["nugget"] + (params["sill"] - params["nugget"]) * (1.5 * d_smooth / params["range"] - 0.5 * (d_smooth / params["range"]) ** 3),
+                                     params["sill"])
+                fig_v.add_trace(go.Scatter(x=d_smooth, y=g_smooth, mode="lines", line=dict(color="#B7950B", width=2),
+                                            name="Modèle sphérique ajusté"))
+                fig_v.update_layout(title="Variogramme expérimental et modèle ajusté", xaxis_title="Distance (m)",
+                                     yaxis_title="Semi-variance", height=420)
+                st.plotly_chart(fig_v, use_container_width=True)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Effet de pépite (nugget)", f"{params['nugget']:.3f}")
+                c2.metric("Palier (sill)", f"{params['sill']:.3f}")
+                c3.metric("Portée (range)", f"{params['range']:.0f} m")
+
+                if st.button("🗺️ Générer la grille krigée"):
+                    grid_res = st.session_state.get("_krig_grid_res", 15)
+                    e_min, e_max = vgrade["Easting"].min(), vgrade["Easting"].max()
+                    n_min, n_max = vgrade["Northing"].min(), vgrade["Northing"].max()
+                    pad_e, pad_n = (e_max - e_min) * 0.15 or 50, (n_max - n_min) * 0.15 or 50
+                    grid_e_ax = np.linspace(e_min - pad_e, e_max + pad_e, grid_res)
+                    grid_n_ax = np.linspace(n_min - pad_n, n_max + pad_n, grid_res)
+                    GE, GN = np.meshgrid(grid_e_ax, grid_n_ax)
+                    est, kstd = ordinary_kriging(vgrade["Easting"].values, vgrade["Northing"].values,
+                                                  vgrade["Teneur_moy_g_t"].values, GE.ravel(), GN.ravel(), params)
+                    est_grid = est.reshape(GE.shape)
+                    std_grid = kstd.reshape(GE.shape)
+
+                    fig_k = go.Figure(go.Contour(x=grid_e_ax, y=grid_n_ax, z=est_grid, colorscale="Turbo",
+                                                  colorbar=dict(title="g/t estimé")))
+                    fig_k.add_trace(go.Scatter(x=vgrade["Easting"], y=vgrade["Northing"], mode="markers+text",
+                                                marker=dict(size=8, color="white", line=dict(color="black", width=1)),
+                                                text=vgrade["Sondage"], textposition="top center", name="Trous"))
+                    fig_k.update_layout(title="Teneur Au estimée par krigeage ordinaire (g/t)", height=500,
+                                         xaxis_title="Easting", yaxis_title="Northing", yaxis=dict(scaleanchor="x", scaleratio=1))
+                    st.plotly_chart(fig_k, use_container_width=True)
+
+                    fig_std = go.Figure(go.Contour(x=grid_e_ax, y=grid_n_ax, z=std_grid, colorscale="Reds",
+                                                    colorbar=dict(title="Écart-type")))
+                    fig_std.update_layout(title="Incertitude du krigeage (écart-type — élevé = peu fiable)",
+                                           height=450, xaxis_title="Easting", yaxis_title="Northing",
+                                           yaxis=dict(scaleanchor="x", scaleratio=1))
+                    st.plotly_chart(fig_std, use_container_width=True)
+
+                    st.info(f"🧠 **Interprétation** : le modèle sphérique indique une portée de "
+                            f"**{params['range']:.0f} m** — au-delà de cette distance, deux points ne sont "
+                            f"plus corrélés spatialement. Les zones à écart-type élevé (carte rouge) sont "
+                            f"loin de tout trou : un forage d'infill y réduirait fortement l'incertitude. "
+                            f"⚠️ Avec {len(vgrade)} points, ce variogramme reste **exploratoire** — il ne "
+                            f"remplace pas une étude géostatistique complète pour une classification "
+                            f"JORC officielle (Mesuré/Indiqué/Inferré).")
+    else:
+        st.info("Chargez des données de teneur géoréférencées ci-dessus pour activer le variogramme.")
+
 elif page == "💵 Budget & Coûts":
     st.subheader("💵 Budget & Coûts détaillé")
     st.write("Tableau de budget éditable par catégorie. Ajoutez vos lignes (forage, analyses, logistique, "
@@ -2015,6 +2102,398 @@ elif page == "🔑 Mon compte":
         else:
             db.change_password(u["username"], new_pwd1)
             st.success("Mot de passe mis à jour avec succès.")
+
+elif page == "🗺️ Carte interactive":
+    st.subheader("🗺️ Carte interactive (fond de carte réel)")
+    st.write("Positionne vos trous sur une vraie carte (satellite/rues), contrairement aux cartes "
+             "Plotly qui affichent seulement des points sur fond blanc. Vos coordonnées (Easting/"
+             "Northing) sont en UTM — précisez la zone pour une conversion correcte en latitude/longitude.")
+
+    c1, c2, c3 = st.columns(3)
+    utm_zone = c1.number_input("Zone UTM", 1, 60, 28, help="28 = Sénégal / Afrique de l'Ouest. Ajustez selon votre région.")
+    hemisphere = c2.selectbox("Hémisphère", ["N", "S"])
+    basemap = c3.selectbox("Fond de carte", ["Satellite (Esri)", "OpenStreetMap"])
+
+    all_df = safe_concat(["RC", "AC", "DD"])
+    if all_df.empty:
+        st.info("Aucune donnée RC/AC/DD chargée.")
+    else:
+        collars = collar_table(all_df).dropna(subset=["Easting", "Northing"])
+        if collars.empty:
+            st.warning("Aucune coordonnée disponible.")
+        else:
+            try:
+                collars[["Lat", "Lon"]] = collars.apply(
+                    lambda r: pd.Series(utm_to_latlon(r["Easting"], r["Northing"], utm_zone, hemisphere)), axis=1)
+            except Exception as e:
+                st.error(f"Erreur de conversion de coordonnées : {e}")
+                collars = pd.DataFrame()
+
+            if not collars.empty:
+                center = [collars["Lat"].mean(), collars["Lon"].mean()]
+                fmap = folium.Map(location=center, zoom_start=14, control_scale=True)
+                if basemap.startswith("Satellite"):
+                    folium.TileLayer(
+                        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                        attr="Esri", name="Satellite", overlay=False,
+                    ).add_to(fmap)
+                else:
+                    folium.TileLayer("OpenStreetMap").add_to(fmap)
+
+                mineral_by_hole = all_df.groupby("Sondage")["Has_Mineralisation"].any() if "Has_Mineralisation" in all_df.columns else {}
+                for _, r in collars.iterrows():
+                    is_mineral = mineral_by_hole.get(r["Sondage"], False) if hasattr(mineral_by_hole, "get") else False
+                    color = "orange" if is_mineral else "blue"
+                    folium.Marker(
+                        location=[r["Lat"], r["Lon"]],
+                        popup=f"<b>{r['Sondage']}</b><br>{r.get('Drill_Type','')}<br>"
+                              f"Profondeur: {r.get('Profondeur_totale', 'N/A')} m<br>"
+                              f"{'⭐ Minéralisé' if is_mineral else ''}",
+                        tooltip=r["Sondage"],
+                        icon=folium.Icon(color=color, icon="info-sign"),
+                    ).add_to(fmap)
+
+                st_folium(fmap, use_container_width=True, height=600)
+                st.caption("🔵 Trou standard · 🟠 Trou avec intervalle(s) minéralisé(s)")
+                st.info(f"🧠 **Interprétation** : {len(collars)} trou(s) positionnés (zone UTM {utm_zone}{hemisphere}). "
+                        f"Si les points semblent mal placés (au milieu de l'océan, autre continent...), "
+                        f"la zone UTM est probablement incorrecte pour votre prospect — ajustez-la ci-dessus.")
+
+elif page == "📈 KPIs exécutif":
+    st.subheader("📈 Dashboard KPIs exécutif")
+    st.write(f"Vue de synthèse pour la direction — prospect **{prospect}**.")
+
+    all_df = safe_concat(["RC", "AC", "DD"])
+    collars = collar_table(all_df) if not all_df.empty else pd.DataFrame()
+    auger = st.session_state.data.get("AUGER", pd.DataFrame())
+    budget = st.session_state.budget
+    samples = st.session_state.samples
+    hse = st.session_state.hse
+    planning = st.session_state.planning
+    admin = st.session_state.admin
+
+    st.markdown("#### 🎯 Avancement terrain")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Trous forés", collars["Sondage"].nunique() if not collars.empty else 0)
+    c2.metric("Mètres forés", f"{collars['Profondeur_totale'].sum():,.0f} m".replace(",", " ") if "Profondeur_totale" in collars.columns else "0 m")
+    n_mineral = int(all_df.groupby("Sondage")["Has_Mineralisation"].any().sum()) if not all_df.empty and "Has_Mineralisation" in all_df.columns else 0
+    c3.metric("Trous minéralisés", n_mineral)
+    n_planned = len(planning) if not planning.empty else 0
+    c4.metric("Trous planifiés (infill/ext.)", n_planned)
+
+    st.markdown("#### 💰 Finances")
+    c1, c2, c3 = st.columns(3)
+    total_budget = (budget["Quantite"].fillna(0) * budget["Cout_unitaire"].fillna(0)).sum() if not budget.empty else 0
+    c1.metric("Budget engagé", f"{total_budget:,.0f}".replace(",", " "))
+    c2.metric("Lignes de coût suivies", len(budget))
+    c3.metric("Échantillons envoyés", len(samples) if not samples.empty else 0)
+
+    st.markdown("#### 🦺 Conformité & sécurité")
+    c1, c2, c3 = st.columns(3)
+    n_hse_open = int(((hse["Gravite"].isin(["Élevée", "Critique"])) & (hse["Statut"] != "Clôturé")).sum()) if not hse.empty else 0
+    c1.metric("Incidents HSE critiques ouverts", n_hse_open)
+    n_admin_issue = int(admin["Statut"].isin(["Expiré", "À renouveler"]).sum()) if not admin.empty else 0
+    c2.metric("Permis à traiter", n_admin_issue)
+    notifs = collect_notifications({k: st.session_state[k] for k in LIVE_KEYS if k != "permis"})
+    n_crit = sum(1 for n in notifs if n["severite"] == "🔴 Critique")
+    c3.metric("Alertes critiques actives", n_crit)
+
+    if not collars.empty and "Profondeur_totale" in collars.columns:
+        fig = go.Figure(go.Bar(x=collars.sort_values("Profondeur_totale", ascending=False).head(15)["Sondage"],
+                                y=collars.sort_values("Profondeur_totale", ascending=False).head(15)["Profondeur_totale"],
+                                marker_color="#1B4F72"))
+        fig.update_layout(title="Top 15 trous les plus profonds", height=380)
+        st.plotly_chart(fig, use_container_width=True)
+
+    if not auger.empty and "Au_ppb" in auger.columns and auger["Au_ppb"].notna().any():
+        g = length_weighted_grade(auger)
+        if not g.empty:
+            fig2 = go.Figure(go.Bar(x=g.sort_values("Teneur_moy_g_t", ascending=False).head(10)["Sondage"],
+                                     y=g.sort_values("Teneur_moy_g_t", ascending=False).head(10)["Teneur_moy_g_t"],
+                                     marker_color="#B7950B"))
+            fig2.update_layout(title="Top 10 teneurs moyennes Au (g/t, Auger)", height=380)
+            st.plotly_chart(fig2, use_container_width=True)
+
+    st.info(f"🧠 **Synthèse exécutive** : le programme totalise **{collars['Sondage'].nunique() if not collars.empty else 0} trous** "
+            f"pour **{collars['Profondeur_totale'].sum() if 'Profondeur_totale' in collars.columns else 0:,.0f} m** forés. "
+            + (f"⚠️ {n_crit} alerte(s) critique(s) nécessitent une attention immédiate. " if n_crit else "Aucune alerte critique active. ")
+            + (f"{n_hse_open} incident(s) HSE grave(s) restent ouverts." if n_hse_open else "Aucun incident HSE grave ouvert."))
+
+elif page == "🎓 Formation / Guide":
+    st.subheader("🎓 Formation & Guide utilisateur intégré")
+    st.write("Aide-mémoire rapide pour chaque module. Pour un document complet et imprimable, "
+             "demandez le Guide Word au chef de projet.")
+
+    guide_sections = {
+        "📥 Import des données": "Chargez vos fichiers Excel de log (RC/AC/DD/Auger/Structural) au format "
+            "des gabarits SMC. Cliquez 'Charger / Recharger toutes les données' après chaque upload.",
+        "📋 Logs & 📐 Sections": "Visualisez le log lithologique d'un trou, ou construisez une section avec "
+            "plusieurs trous (légende, nord, échelle automatiques).",
+        "🗺️ Cartes & 🗺️ Carte interactive": "Cartes lithologie/structurale/anomalie (Plotly) pour l'analyse, "
+            "ou carte interactive (Folium) avec vrai fond satellite pour la navigation terrain.",
+        "🧊 Modèle 3D & 🛰️ Survey": "Modèle 3D basé sur azimut/pendage moyen (estimation) ; Survey utilise "
+            "de vrais relevés déviométriques pour une trajectoire précise.",
+        "🛠️ Planification & 🎯 Simulation": "Planifiez vos trous d'infill/extension (tableau éditable + carte "
+            "par statut) ; simulez une déviation théorique avant de forer.",
+        "💰 Estimation & 📦 Ressources": "Teneur moyenne pondérée par trou, puis estimation indicative de "
+            "tonnage/once d'or (méthode simplifiée, pas un rapport JORC certifié).",
+        "🔗 Échantillons & ⚗️ Métallurgie": "Suivi chain of custody des échantillons ; résultats d'essais "
+            "métallurgiques (récupération, réactifs).",
+        "🦺 HSE & 🛡️ Admin": "Suivi incidents/formations HSE ; suivi permis/contrats avec alertes d'expiration.",
+        "🤖 Audit & 🔔 Notifications": "L'audit détecte les erreurs de données (intervalles invalides, "
+            "chevauchements) ; les notifications consolident toutes les alertes actives du prospect.",
+        "📄 Rapport & 📈 KPIs": "Rapport géologique argumenté exportable en PDF ; KPIs exécutif pour une "
+            "vue de synthèse destinée à la direction.",
+        "👤 Utilisateurs": "Gestion des comptes (réservée aux rôles Administrateur/Manageur/Chef de projet) "
+            "— création, réinitialisation de mot de passe, suppression.",
+    }
+    for title, text in guide_sections.items():
+        with st.expander(title):
+            st.write(text)
+
+    st.markdown("---")
+    st.markdown("#### 🆘 Besoin d'aide ?")
+    st.write("Contactez votre chef de projet ou l'administrateur du dashboard (voir onglet 👤 Utilisateurs "
+             "pour la liste des rôles). Pour signaler un bug ou suggérer une amélioration, utilisez "
+             "l'onglet 💬 Commentaires & Réponses.")
+
+elif page == "🔗 API Laboratoire":
+    st.subheader("🔗 Connecteur API Laboratoire")
+    st.info("ℹ️ Je n'ai pas accès à l'API de votre laboratoire spécifique (identifiants, format de "
+            "réponse propres à chaque labo). Ce connecteur est **générique** : il envoie une requête "
+            "à n'importe quelle API REST qui retourne du JSON, et transforme la réponse en tableau. "
+            "Donnez-moi la documentation de l'API de votre labo si vous voulez un connecteur adapté "
+            "précisément à son format.")
+
+    with st.form("lab_api_form"):
+        api_url = st.text_input("URL de l'API", placeholder="https://api.votrelabo.com/v1/results")
+        api_key = st.text_input("Clé API / Token (si requis)", type="password")
+        auth_style = st.selectbox("Type d'authentification", ["Header 'Authorization: Bearer <clé>'", "Header 'X-API-Key: <clé>'", "Aucune"])
+        submit_api = st.form_submit_button("📡 Interroger l'API", type="primary")
+
+    if submit_api and api_url:
+        headers = {}
+        if auth_style.startswith("Header 'Authorization") and api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        elif auth_style.startswith("Header 'X-API-Key") and api_key:
+            headers["X-API-Key"] = api_key
+        try:
+            resp = requests.get(api_url, headers=headers, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            records = data if isinstance(data, list) else data.get("results", data.get("data", [data]))
+            api_df = pd.json_normalize(records)
+            st.session_state["_lab_api_result"] = api_df
+            st.success(f"✅ {len(api_df)} enregistrement(s) reçus.")
+        except Exception as e:
+            st.error(f"Échec de la requête : {e}")
+
+    api_df = st.session_state.get("_lab_api_result")
+    if api_df is not None and not api_df.empty:
+        st.dataframe(api_df, use_container_width=True, height=400)
+        st.download_button("📥 Télécharger en CSV", api_df.to_csv(index=False).encode("utf-8"),
+                            "resultats_labo_api.csv", "text/csv")
+        st.caption("Ces résultats peuvent être réutilisés dans les onglets Estimation des teneurs / "
+                   "Ressources en les uploadant comme 'fichier d'assays externe' (téléchargez le CSV "
+                   "ci-dessus puis re-uploadez-le où nécessaire).")
+    else:
+        st.info("Aucun résultat encore récupéré. Configurez et interrogez votre API ci-dessus.")
+
+elif page == "🤖 Assistant IA":
+    st.subheader("🤖 Assistant IA d'interprétation")
+    st.info("ℹ️ Cette fonctionnalité utilise **votre propre clé API Anthropic** (Claude) pour analyser "
+            "vos données et répondre à vos questions en langage naturel. La clé n'est utilisée que "
+            "pour la session en cours, jamais sauvegardée. Créez une clé sur console.anthropic.com si "
+            "vous n'en avez pas.")
+
+    api_key_ai = st.text_input("Clé API Anthropic", type="password", key="anthropic_key_input")
+    question = st.text_area("Votre question sur les données du prospect",
+                             placeholder="Ex: Quelles sont les zones les plus prometteuses et pourquoi ?")
+
+    if st.button("🧠 Demander à l'IA", type="primary"):
+        if not api_key_ai:
+            st.error("Entrez votre clé API Anthropic ci-dessus.")
+        elif not question:
+            st.error("Entrez une question.")
+        else:
+            all_df_ai = safe_concat(["RC", "AC", "DD"])
+            summary_parts = [f"Prospect: {prospect}"]
+            if not all_df_ai.empty:
+                summary_parts.append(f"Trous RC/AC/DD: {all_df_ai['Sondage'].nunique()}")
+                if "Lithologie" in all_df_ai.columns:
+                    summary_parts.append(f"Lithologies principales: {', '.join(all_df_ai['Lithologie'].dropna().value_counts().head(5).index.tolist())}")
+                if "Has_Mineralisation" in all_df_ai.columns:
+                    summary_parts.append(f"Trous minéralisés: {int(all_df_ai.groupby('Sondage')['Has_Mineralisation'].any().sum())}/{all_df_ai['Sondage'].nunique()}")
+            auger_ai = st.session_state.data.get("AUGER", pd.DataFrame())
+            if not auger_ai.empty and "Au_ppb" in auger_ai.columns:
+                summary_parts.append(f"Teneur Au sols - moyenne: {auger_ai['Au_ppb'].mean():.1f} ppb, max: {auger_ai['Au_ppb'].max():.1f} ppb")
+            data_summary = "\n".join(summary_parts)
+
+            try:
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": api_key_ai, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={
+                        "model": "claude-sonnet-4-6",
+                        "max_tokens": 1000,
+                        "messages": [{"role": "user", "content":
+                            f"Voici un résumé des données géologiques d'un prospect minier:\n\n{data_summary}\n\n"
+                            f"Question du géologue: {question}\n\n"
+                            f"Réponds en français, de façon concise et technique, en te basant uniquement "
+                            f"sur les données fournies. Si les données sont insuffisantes pour répondre "
+                            f"précisément, dis-le clairement."}],
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                answer = resp.json()["content"][0]["text"]
+                st.markdown("#### 💬 Réponse")
+                st.write(answer)
+            except Exception as e:
+                st.error(f"Échec de l'appel à l'API Anthropic : {e}")
+
+elif page == "🎨 Apparence":
+    st.subheader("🎨 Apparence & Optimisation mobile")
+    c1, c2 = st.columns(2)
+    primary_color = c1.color_picker("Couleur principale", "#1B2631")
+    accent_color = c2.color_picker("Couleur d'accent", "#C9A227")
+    mobile_mode = st.checkbox("📱 Mode mobile (police et espacements réduits)", value=False)
+
+    font_scale = "0.85em" if mobile_mode else "1em"
+    st.markdown(f"""
+    <style>
+    .stApp {{ font-size: {font_scale}; }}
+    h1, h2, h3 {{ color: {primary_color}; }}
+    .stButton>button {{ border-color: {accent_color}; }}
+    section[data-testid="stSidebar"] {{ padding-top: {"0.5rem" if mobile_mode else "1rem"}; }}
+    @media (max-width: 640px) {{
+        .stApp {{ font-size: 0.8em; }}
+        div[data-testid="column"] {{ min-width: 100% !important; }}
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+    st.success("Aperçu appliqué à cette session. Pour rendre ce thème permanent pour tout le monde, "
+               "communiquez-moi les couleurs choisies et je les intègre en dur dans le code.")
+    st.caption("⚠️ Streamlit reste fondamentalement une mise en page desktop-first ; ce mode mobile "
+               "réduit les tailles mais ne réorganise pas la structure des pages (colonnes multiples "
+               "restent côte à côte sur certains écrans très étroits).")
+
+elif page == "⛰️ Topographie":
+    st.subheader("⛰️ Topographie")
+    st.write("Chargez un semis de points (Easting, Northing, Élévation) — levé topographique ou "
+             "extrait de MNT — pour générer des courbes de niveau et une surface 3D.")
+    f_topo = st.file_uploader("Fichier topographique (xlsx/csv) — colonnes X, Y, Z", type=["xlsx", "csv"], key="topo_up")
+    if f_topo:
+        tdf = pd.read_csv(f_topo) if f_topo.name.endswith(".csv") else pd.read_excel(f_topo)
+        cols = tdf.columns.tolist()
+        c1, c2, c3 = st.columns(3)
+        xcol = c1.selectbox("Colonne Easting (X)", cols, index=0)
+        ycol = c2.selectbox("Colonne Northing (Y)", cols, index=min(1, len(cols) - 1))
+        zcol = c3.selectbox("Colonne Élévation (Z)", cols, index=min(2, len(cols) - 1))
+
+        from scipy.interpolate import griddata
+        x, y, z = tdf[xcol].values, tdf[ycol].values, tdf[zcol].values
+        grid_x = np.linspace(x.min(), x.max(), 60)
+        grid_y = np.linspace(y.min(), y.max(), 60)
+        GX, GY = np.meshgrid(grid_x, grid_y)
+        GZ = griddata((x, y), z, (GX, GY), method="cubic")
+
+        tab_contour, tab_3d = st.tabs(["🗾 Courbes de niveau", "🏔️ Surface 3D"])
+        with tab_contour:
+            fig_c = go.Figure(go.Contour(x=grid_x, y=grid_y, z=GZ, colorscale="Earth",
+                                          contours=dict(showlabels=True), colorbar=dict(title="Élévation (m)")))
+            fig_c.update_layout(title="Courbes de niveau", height=550, xaxis_title="Easting", yaxis_title="Northing",
+                                 yaxis=dict(scaleanchor="x", scaleratio=1))
+            st.plotly_chart(fig_c, use_container_width=True)
+        with tab_3d:
+            fig_3d = go.Figure(go.Surface(x=grid_x, y=grid_y, z=GZ, colorscale="Earth"))
+            fig_3d.update_layout(title="Surface topographique 3D", height=600,
+                                  scene=dict(xaxis_title="Easting", yaxis_title="Northing", zaxis_title="Élévation (m)"))
+            st.plotly_chart(fig_3d, use_container_width=True)
+        st.info(f"🧠 Dénivelé du levé : **{z.max() - z.min():.1f} m** (min {z.min():.1f} m, max {z.max():.1f} m) "
+                f"sur {len(tdf)} points. Superposez cette topographie aux collars (onglet Carte interactive) "
+                f"pour analyser le contrôle du relief sur l'accessibilité des cibles de forage.")
+    else:
+        st.info("Aucun fichier topographique chargé.")
+
+elif page == "🌍 Géomatique":
+    st.subheader("🌍 Géomatique — couches GeoJSON")
+    st.write("Chargez des couches géographiques au format **GeoJSON** (limites de permis, routes, "
+             "cours d'eau, zones d'affleurement...) pour les superposer à vos trous sur une carte réelle.")
+    f_geo = st.file_uploader("Fichier GeoJSON", type=["geojson", "json"], key="geojson_up")
+
+    all_df_geo = safe_concat(["RC", "AC", "DD"])
+    collars_geo = collar_table(all_df_geo).dropna(subset=["Easting", "Northing"]) if not all_df_geo.empty else pd.DataFrame()
+    c1, c2 = st.columns(2)
+    utm_zone_g = c1.number_input("Zone UTM (pour les collars)", 1, 60, 28, key="geo_utm_zone")
+    hemisphere_g = c2.selectbox("Hémisphère", ["N", "S"], key="geo_hemisphere")
+
+    if f_geo:
+        geojson_data = _json.load(f_geo)
+        try:
+            coords_sample = geojson_data["features"][0]["geometry"]["coordinates"]
+            center = [14.5, -14.5]  # centre par défaut Sénégal si pas de collars
+            if not collars_geo.empty:
+                collars_geo[["Lat", "Lon"]] = collars_geo.apply(
+                    lambda r: pd.Series(utm_to_latlon(r["Easting"], r["Northing"], utm_zone_g, hemisphere_g)), axis=1)
+                center = [collars_geo["Lat"].mean(), collars_geo["Lon"].mean()]
+            fmap_geo = folium.Map(location=center, zoom_start=13)
+            folium.TileLayer(
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri", name="Satellite",
+            ).add_to(fmap_geo)
+            folium.GeoJson(geojson_data, name="Couche importée",
+                            style_function=lambda x: {"color": "#F4D03F", "weight": 3, "fillOpacity": 0.15}).add_to(fmap_geo)
+            if not collars_geo.empty:
+                for _, r in collars_geo.iterrows():
+                    folium.CircleMarker(location=[r["Lat"], r["Lon"]], radius=5, color="#2471A3",
+                                         fill=True, tooltip=r["Sondage"]).add_to(fmap_geo)
+            folium.LayerControl().add_to(fmap_geo)
+            st_folium(fmap_geo, use_container_width=True, height=600)
+            st.success(f"✅ Couche GeoJSON chargée ({len(geojson_data.get('features', []))} entité(s)).")
+        except Exception as e:
+            st.error(f"Erreur de lecture du GeoJSON : {e}")
+    else:
+        st.info("Aucun fichier GeoJSON chargé. Formats compatibles : limites de permis, polygones "
+                "géologiques, tracés de routes/rivières exportés depuis QGIS/ArcGIS (Export → GeoJSON).")
+
+elif page == "📑 Modèles Excel":
+    st.subheader("📑 Modèles Excel vierges")
+    st.write("Téléchargez des gabarits vierges (même structure que celle attendue par l'onglet Import) "
+             "pour la saisie terrain ou l'onboarding de nouveaux géologues.")
+
+    def _blank_template(sheets_cols):
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            for sheet_name, cols in sheets_cols.items():
+                pd.DataFrame(columns=cols).to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+        buf.seek(0)
+        return buf.getvalue()
+
+    templates = {
+        "Modèle Log RC/AC/DD": {
+            "Geologie": ["Easting_manuel", "Northing_manuel", "Elevation_manuel", "Easting_repiquage",
+                         "Northing_repiquage", "Elevation_repiquage", "Sondage", "From", "To", "Priorite",
+                         "Lithologie", "Code_Litho", "Couleur", "Grain", "Texture", "Oxydation", "Magn",
+                         "Durete", "Contact", "Code_Strat", "Formation", "Age", "Type_Ech"],
+            "W": ["From", "To", "Weathering_1", "Weathering_2"],
+            "M": ["From", "To", "Sulf_code1", "Pct1", "Sulf_code2", "Pct2", "Sulf_code3", "Pct3", "Auto"],
+            "Al": ["From", "To", "Alteration_type", "Intensite"],
+        },
+        "Modèle Log Auger / Géochimie sols": {
+            "Logs_Sols": ["Easting", "Northing", "Elevation", "Sondage", "From", "To", "Interval_m",
+                          "Litho_Code", "Lithologie", "Code_Strat", "Formation", "Horizon_Sol", "Couleur",
+                          "Texture", "Echant_ID", "Labo_Au_ppb"],
+        },
+        "Modèle Log Structural": {
+            "Logs_Geotechniques": ["Easting_repiquage", "Northing_repiquage", "Elevation_repiquage",
+                                    "Sondage", "From_m", "To_m", "Azimut", "Pendage", "OCTypes",
+                                    "GSI_auto", "RQD_auto"],
+        },
+    }
+    for name, sheets in templates.items():
+        st.download_button(f"📥 {name}", _blank_template(sheets), f"{name.replace(' ', '_')}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"tpl_{name}")
 
 elif page == "📊 Synthèse / Collars":
 

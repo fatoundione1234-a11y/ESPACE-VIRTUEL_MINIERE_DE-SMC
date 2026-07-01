@@ -667,6 +667,107 @@ def collect_notifications(state):
     return notifs
 
 
+def utm_to_latlon(easting, northing, zone=28, hemisphere="N"):
+    """Convertit des coordonnées UTM (Easting/Northing, typiques des données minières) en
+    Latitude/Longitude (WGS84) pour affichage sur une carte réelle (Folium/Leaflet).
+    Zone 28N est la zone UTM couvrant le Sénégal et une grande partie de l'Afrique de l'Ouest —
+    à ajuster si le prospect se trouve ailleurs."""
+    import pyproj
+    epsg = 32600 + zone if hemisphere.upper() == "N" else 32700 + zone
+    transformer = pyproj.Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(easting, northing)
+    return lat, lon
+
+
+def experimental_variogram(easting, northing, values, n_lags=10, max_dist=None):
+    """Calcule le variogramme expérimental (semi-variance par classe de distance) à partir de
+    points géoréférencés et de leurs valeurs (ex: teneur Au). Nécessite un minimum de points
+    pour être statistiquement significatif (idéalement >30, ici on l'autorise dès 5 pour usage
+    pédagogique/exploratoire — les résultats avec peu de points sont peu fiables)."""
+    coords = np.column_stack([easting, northing])
+    n = len(coords)
+    if n < 4:
+        return pd.DataFrame(), None
+    dists, semivars = [], []
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = np.sqrt(np.sum((coords[i] - coords[j]) ** 2))
+            dists.append(d)
+            semivars.append(0.5 * (values[i] - values[j]) ** 2)
+    dists = np.array(dists)
+    semivars = np.array(semivars)
+    if max_dist is None:
+        max_dist = dists.max()
+    bins = np.linspace(0, max_dist, n_lags + 1)
+    lag_centers, lag_semivar, lag_counts = [], [], []
+    for k in range(n_lags):
+        mask = (dists >= bins[k]) & (dists < bins[k + 1])
+        if mask.sum() > 0:
+            lag_centers.append((bins[k] + bins[k + 1]) / 2)
+            lag_semivar.append(semivars[mask].mean())
+            lag_counts.append(int(mask.sum()))
+    vdf = pd.DataFrame({"Distance": lag_centers, "Semi_variance": lag_semivar, "N_paires": lag_counts})
+    return vdf, max_dist
+
+
+def fit_spherical_variogram(vdf):
+    """Ajuste un modèle sphérique (nugget, sill, range) au variogramme expérimental par
+    moindres carrés simples (grille de recherche — suffisant pour un usage exploratoire)."""
+    if vdf.empty or len(vdf) < 3:
+        return {"nugget": 0, "sill": 1, "range": 1}
+    d = vdf["Distance"].values
+    g = vdf["Semi_variance"].values
+    best = {"nugget": 0, "sill": g.max(), "range": d.max() / 2, "error": np.inf}
+    for rng in np.linspace(d.max() * 0.1, d.max(), 15):
+        for sill in np.linspace(g.max() * 0.5, g.max() * 1.3, 10):
+            for nugget in np.linspace(0, g.max() * 0.5, 6):
+                pred = np.where(d <= rng,
+                                 nugget + (sill - nugget) * (1.5 * d / rng - 0.5 * (d / rng) ** 3),
+                                 sill)
+                err = np.sum((pred - g) ** 2)
+                if err < best["error"]:
+                    best = {"nugget": nugget, "sill": sill, "range": rng, "error": err}
+    return best
+
+
+def _spherical_cov(h, nugget, sill, rng):
+    h = np.asarray(h)
+    gamma = np.where(h == 0, 0, np.where(h <= rng, nugget + (sill - nugget) * (1.5 * h / rng - 0.5 * (h / rng) ** 3), sill))
+    return sill - gamma  # covariance = sill - semivariance (modèle stationnaire)
+
+
+def ordinary_kriging(easting, northing, values, grid_e, grid_n, variogram_params):
+    """Krigeage ordinaire simplifié sur une grille régulière. Retourne les estimations et
+    l'écart-type de krigeage (indicateur de confiance — plus il est élevé, moins l'estimation
+    à ce point est fiable, typiquement loin des trous)."""
+    coords = np.column_stack([easting, northing])
+    n = len(coords)
+    nugget, sill, rng = variogram_params["nugget"], variogram_params["sill"], variogram_params["range"]
+
+    D = np.sqrt(((coords[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
+    C = _spherical_cov(D, nugget, sill, rng)
+    A = np.ones((n + 1, n + 1))
+    A[:n, :n] = C
+    A[n, n] = 0
+    try:
+        A_inv = np.linalg.pinv(A)
+    except np.linalg.LinAlgError:
+        return np.full(len(grid_e), np.nan), np.full(len(grid_e), np.nan)
+
+    estimates, kriging_std = [], []
+    for ge, gn in zip(grid_e, grid_n):
+        d0 = np.sqrt((coords[:, 0] - ge) ** 2 + (coords[:, 1] - gn) ** 2)
+        c0 = _spherical_cov(d0, nugget, sill, rng)
+        b = np.append(c0, 1.0)
+        w = A_inv @ b
+        weights = w[:n]
+        est = np.sum(weights * values)
+        var = sill - np.sum(weights * c0) - w[n]
+        estimates.append(est)
+        kriging_std.append(np.sqrt(max(var, 0)))
+    return np.array(estimates), np.array(kriging_std)
+
+
 def collar_table(df, depth_col_candidates=("To", "To_m")):
     """Construit une table des collars (1 ligne par trou) : easting, northing, elevation,
     profondeur totale, type de forage."""
