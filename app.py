@@ -36,6 +36,21 @@ if st.session_state.auth_user is None:
     </div>
     """, unsafe_allow_html=True)
 
+    just_created = st.session_state.get("_just_created_accounts")
+    if just_created:
+        st.success(f"✅ {len(just_created)} comptes créés ! ⚠️ Notez/téléchargez cette liste MAINTENANT — "
+                   "les mots de passe en clair ne seront plus jamais réaffichés ensuite, nulle part.")
+        cdf = pd.DataFrame(just_created)
+        st.dataframe(cdf, use_container_width=True, height=400)
+        st.download_button("📥 Télécharger la liste (CSV) — à distribuer de façon sécurisée",
+                            cdf.to_csv(index=False).encode("utf-8"), "comptes_smc_dashboard.csv", "text/csv")
+        st.info("Chaque personne devra idéalement changer son mot de passe à sa première connexion "
+                "(onglet '🔑 Mon compte' une fois connecté).")
+        if st.button("✅ J'ai bien noté / téléchargé la liste — continuer vers la connexion", type="primary"):
+            del st.session_state["_just_created_accounts"]
+            st.rerun()
+        st.stop()
+
     if db.user_count() == 0:
         st.warning("⚙️ Aucun compte n'existe encore. Initialisez les comptes de l'équipe (une seule fois).")
         if st.button("🚀 Créer tous les comptes de l'équipe (+ 1 compte administrateur)", type="primary"):
@@ -48,17 +63,6 @@ if st.session_state.auth_user is None:
             created.append({"Nom": "Administrateur SMC", "Rôle": "Administrateur", "Identifiant": admin_u, "Mot de passe initial": admin_p})
             st.session_state["_just_created_accounts"] = created
             st.rerun()
-
-        just_created = st.session_state.get("_just_created_accounts")
-        if just_created:
-            st.success(f"{len(just_created)} comptes créés ! ⚠️ Notez/téléchargez cette liste MAINTENANT — "
-                       "les mots de passe en clair ne seront plus jamais réaffichés ensuite.")
-            cdf = pd.DataFrame(just_created)
-            st.dataframe(cdf, use_container_width=True, height=400)
-            st.download_button("📥 Télécharger la liste (CSV) — à distribuer de façon sécurisée",
-                                cdf.to_csv(index=False).encode("utf-8"), "comptes_smc_dashboard.csv", "text/csv")
-            st.info("Chaque personne devra changer son mot de passe à sa première connexion (onglet "
-                    "'Mon compte' une fois connecté).")
         st.stop()
 
     st.subheader("🔐 Connexion")
@@ -1940,6 +1944,29 @@ elif page == "👤 Utilisateurs":
         if st.button("Réinitialiser le mot de passe"):
             new_pwd = db.reset_password(target_user)
             st.success(f"Nouveau mot de passe pour **{target_user}** : **{new_pwd}** — à communiquer immédiatement.")
+
+        st.markdown("---")
+        st.markdown("#### 🔄🔄 Réinitialiser TOUS les mots de passe d'un coup")
+        st.caption("Utile si la liste initiale a été perdue (comme après une réinitialisation de la base). "
+                   "Génère un nouveau mot de passe pour chaque compte existant et affiche/télécharge la liste complète.")
+        if st.button("⚠️ Réinitialiser tous les mots de passe"):
+            all_new = []
+            for u in users:
+                new_pwd = db.reset_password(u["username"])
+                all_new.append({"Nom": u["full_name"], "Rôle": u["role"], "Identifiant": u["username"], "Nouveau mot de passe": new_pwd})
+            st.session_state["_bulk_reset_result"] = all_new
+            st.rerun()
+
+        bulk_reset = st.session_state.get("_bulk_reset_result")
+        if bulk_reset:
+            st.success(f"✅ {len(bulk_reset)} mots de passe réinitialisés ! Notez/téléchargez MAINTENANT.")
+            bdf = pd.DataFrame(bulk_reset)
+            st.dataframe(bdf, use_container_width=True, height=400)
+            st.download_button("📥 Télécharger la liste (CSV)", bdf.to_csv(index=False).encode("utf-8"),
+                                "mots_de_passe_reinitialises.csv", "text/csv", key="dl_bulk_reset")
+            if st.button("J'ai bien noté / téléchargé cette liste"):
+                del st.session_state["_bulk_reset_result"]
+                st.rerun()
 
         st.markdown("---")
         st.markdown("#### 🗑️ Supprimer un compte")
