@@ -573,6 +573,48 @@ def report_to_markdown(sections, prospect, permis):
     return md
 
 
+def parse_survey_dataframe(raw_df, hole_col, depth_col, az_col, dip_col):
+    """Standardise un fichier de survey (déviomètre) uploadé par l'utilisateur, quelle que soit
+    la nomenclature de ses colonnes d'origine, vers Sondage/Depth/Azimut/Pendage."""
+    d = raw_df.rename(columns={hole_col: "Sondage", depth_col: "Depth", az_col: "Azimut", dip_col: "Pendage"}).copy()
+    d = d[["Sondage", "Depth", "Azimut", "Pendage"]]
+    for c in ["Depth", "Azimut", "Pendage"]:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["Sondage", "Depth"]).sort_values(["Sondage", "Depth"]).reset_index(drop=True)
+    return d
+
+
+def build_survey_trajectory(survey_hole_df, collar_e, collar_n, collar_z):
+    """Calcule la trajectoire réelle d'un trou à partir de plusieurs stations de survey
+    (Depth, Azimut, Pendage), par la méthode tangentielle équilibrée (moyenne des angles entre
+    deux stations consécutives) — standard simplifié de désurvey en sondage minier."""
+    s = survey_hole_df.dropna(subset=["Depth", "Azimut", "Pendage"]).sort_values("Depth").reset_index(drop=True)
+    if s.empty:
+        return pd.DataFrame()
+    pts = [{"Depth": 0.0, "Easting": collar_e, "Northing": collar_n, "Elevation": collar_z,
+            "Azimut": s["Azimut"].iloc[0], "Pendage": s["Pendage"].iloc[0]}]
+    if s["Depth"].iloc[0] > 0:
+        pts[0]["Depth"] = 0.0
+    prev = pts[0]
+    for _, row in s.iterrows():
+        dmd = row["Depth"] - prev["Depth"]
+        if dmd <= 0:
+            prev = {"Depth": row["Depth"], "Easting": prev["Easting"], "Northing": prev["Northing"],
+                    "Elevation": prev["Elevation"], "Azimut": row["Azimut"], "Pendage": row["Pendage"]}
+            continue
+        az_avg = np.radians((prev["Azimut"] + row["Azimut"]) / 2)
+        dip_avg = np.radians((prev["Pendage"] + row["Pendage"]) / 2)
+        horiz = dmd * np.cos(dip_avg)
+        dz = -dmd * np.sin(dip_avg)
+        dx = horiz * np.sin(az_avg)
+        dy = horiz * np.cos(az_avg)
+        new_pt = {"Depth": row["Depth"], "Easting": prev["Easting"] + dx, "Northing": prev["Northing"] + dy,
+                   "Elevation": prev["Elevation"] + dz, "Azimut": row["Azimut"], "Pendage": row["Pendage"]}
+        pts.append(new_pt)
+        prev = new_pt
+    return pd.DataFrame(pts)
+
+
 def collar_table(df, depth_col_candidates=("To", "To_m")):
     """Construit une table des collars (1 ligne par trou) : easting, northing, elevation,
     profondeur totale, type de forage."""
