@@ -615,6 +615,58 @@ def build_survey_trajectory(survey_hole_df, collar_e, collar_n, collar_z):
     return pd.DataFrame(pts)
 
 
+def collect_notifications(state):
+    """Scanne l'état complet d'un prospect et remonte les alertes actives : permis expirés,
+    incidents HSE critiques non clôturés, échantillons rejetés, forages stoppés, anomalies
+    d'audit récentes. Retourne une liste de dicts {severite, categorie, message}."""
+    notifs = []
+
+    admin = state.get("admin")
+    if admin is not None and not admin.empty:
+        for _, r in admin.iterrows():
+            if r.get("Statut") == "Expiré":
+                notifs.append({"severite": "🔴 Critique", "categorie": "Admin",
+                                "message": f"{r.get('Categorie', 'Élément')} '{r.get('Element', '')}' EXPIRÉ — action requise."})
+            elif r.get("Statut") == "À renouveler":
+                notifs.append({"severite": "⚠️ Attention", "categorie": "Admin",
+                                "message": f"{r.get('Categorie', 'Élément')} '{r.get('Element', '')}' à renouveler prochainement."})
+
+    hse = state.get("hse")
+    if hse is not None and not hse.empty:
+        for _, r in hse.iterrows():
+            if r.get("Gravite") in ("Élevée", "Critique") and r.get("Statut") != "Clôturé":
+                notifs.append({"severite": "🔴 Critique", "categorie": "HSE",
+                                "message": f"Événement HSE {r.get('Gravite', '')} non clôturé : {r.get('Description', '')[:80]}"})
+
+    samples = state.get("samples")
+    if samples is not None and not samples.empty and "Statut" in samples.columns:
+        n_rejected = int((samples["Statut"] == "Rejeté/à reprendre").sum())
+        if n_rejected:
+            notifs.append({"severite": "⚠️ Attention", "categorie": "Échantillons",
+                            "message": f"{n_rejected} échantillon(s) marqué(s) 'Rejeté/à reprendre'."})
+
+    planning = state.get("planning")
+    if planning is not None and not planning.empty and "Statut" in planning.columns:
+        n_stop = int((planning["Statut"] == "Stoppé").sum())
+        if n_stop:
+            notifs.append({"severite": "⚠️ Attention", "categorie": "Planification",
+                            "message": f"{n_stop} trou(s) de forage marqué(s) 'Stoppé' — revue nécessaire."})
+
+    data = state.get("data", {})
+    for key, label in [("RC", "RC"), ("AC", "AC"), ("DD", "DD")]:
+        df = data.get(key)
+        if df is not None and not df.empty:
+            issues = audit_dataframe(df, label)
+            n_crit = sum(1 for i in issues if i["severite"] == "🔴 Critique")
+            if n_crit:
+                notifs.append({"severite": "🔴 Critique", "categorie": "Qualité des données",
+                                "message": f"{n_crit} anomalie(s) critique(s) détectée(s) dans le log {label} (voir Audit automatique)."})
+
+    if not notifs:
+        notifs.append({"severite": "✅ OK", "categorie": "Général", "message": "Aucune alerte active détectée."})
+    return notifs
+
+
 def collar_table(df, depth_col_candidates=("To", "To_m")):
     """Construit une table des collars (1 ligne par trou) : easting, northing, elevation,
     profondeur totale, type de forage."""

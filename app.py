@@ -11,9 +11,11 @@ from parsers import (
     collar_table, build_litho_color_map, LITHO_PALETTE, WEATHERING_COLORS, generate_demo_data,
     hole_trajectory, length_weighted_grade, audit_dataframe, auto_fix_dataframe,
     generate_geological_report, report_to_markdown, parse_survey_dataframe, build_survey_trajectory,
+    collect_notifications,
 )
 from pdf_report import build_pdf_report
 import db
+from translations import t_nav, t_ui, DASHBOARD_TITLE, DASHBOARD_SUBTITLE
 
 st.set_page_config(page_title="ESPACE VIRTUELLE MINIÈRE DE SMC", layout="wide", page_icon="⛏️")
 db.init_db()
@@ -96,21 +98,31 @@ if "active_project" not in st.session_state:
     st.session_state.active_project = existing[0]
     _load_project(st.session_state.active_project)
 
+if "lang" not in st.session_state:
+    st.session_state.lang = "FR"
+st.sidebar.markdown("### 🌐 Langue / Language")
+lang = st.sidebar.radio("Langue / Language", ["FR", "EN"], index=["FR", "EN"].index(st.session_state.lang),
+                         horizontal=True, label_visibility="collapsed")
+st.session_state.lang = lang
+
 # ---------------------------------------------------------------------------
 # En-tête
 # ---------------------------------------------------------------------------
-st.markdown("""
+st.markdown(f"""
 <div style="background:linear-gradient(90deg,#1B2631,#283747);padding:18px 24px;border-radius:10px;margin-bottom:6px;">
-  <h1 style="color:#F4D03F;margin:0;font-size:32px;">⛏️ ESPACE VIRTUELLE MINIÈRE DE SMC</h1>
-  <p style="color:#D6DBDF;margin:4px 0 0 0;font-size:15px;">Dashboard d'exploration minière — Sections géologiques & Logs automatisés (Phase 1)</p>
+  <h1 style="color:#F4D03F;margin:0;font-size:32px;">⛏️ {DASHBOARD_TITLE[lang]}</h1>
+  <p style="color:#D6DBDF;margin:4px 0 0 0;font-size:15px;">{DASHBOARD_SUBTITLE[lang]}</p>
 </div>
 """, unsafe_allow_html=True)
+if lang == "EN":
+    st.caption("ℹ️ Only the navigation menu and main interface labels are translated to English. "
+               "Detailed page content (tables, automated interpretations) remains in French for now.")
 
-st.sidebar.markdown("### 🌍 Prospect actif")
+st.sidebar.markdown(f"### {t_ui('🌍 Prospect actif', lang)}")
 proj_names = db.list_projects()
 if st.session_state.active_project not in proj_names:
     proj_names.append(st.session_state.active_project)
-chosen = st.sidebar.selectbox("Sélectionner un prospect", proj_names,
+chosen = st.sidebar.selectbox(t_ui("Sélectionner un prospect", lang), proj_names,
                                index=proj_names.index(st.session_state.active_project))
 if chosen != st.session_state.active_project:
     _save_active_to_db()  # sauvegarde l'ancien prospect avant de changer
@@ -120,29 +132,29 @@ if chosen != st.session_state.active_project:
 
 last_saved = db.last_saved(st.session_state.active_project)
 if last_saved:
-    st.sidebar.caption(f"💾 Dernière sauvegarde : {last_saved}")
+    st.sidebar.caption(f"💾 {'Dernière sauvegarde' if lang == 'FR' else 'Last saved'} : {last_saved}")
 
-with st.sidebar.expander("➕ Créer / supprimer un prospect"):
-    new_name = st.text_input("Nom du nouveau prospect", key="new_proj_name")
-    if st.button("Créer ce prospect") and new_name and new_name not in proj_names:
+with st.sidebar.expander(t_ui("➕ Créer / supprimer un prospect", lang)):
+    new_name = st.text_input(t_ui("Nom du nouveau prospect", lang), key="new_proj_name")
+    if st.button(t_ui("Créer ce prospect", lang)) and new_name and new_name not in proj_names:
         _save_active_to_db()
         db.save_project_state(new_name, _fresh_project_state())
         st.session_state.active_project = new_name
         _load_project(new_name)
         st.rerun()
-    if len(proj_names) > 1 and st.button("🗑️ Supprimer le prospect actif", type="secondary"):
+    if len(proj_names) > 1 and st.button(t_ui("🗑️ Supprimer le prospect actif", lang), type="secondary"):
         db.delete_project(st.session_state.active_project)
         remaining = db.list_projects()
         st.session_state.active_project = remaining[0]
         _load_project(remaining[0])
         st.rerun()
 
-if st.sidebar.button("💾 Sauvegarder maintenant"):
+if st.sidebar.button(t_ui("💾 Sauvegarder maintenant", lang)):
     _save_active_to_db()
-    st.sidebar.success("Sauvegardé.")
+    st.sidebar.success("Sauvegardé." if lang == "FR" else "Saved.")
 
 prospect = st.session_state.active_project
-permis = st.sidebar.text_input("Nom du permis", value=st.session_state.get("permis", ""))
+permis = st.sidebar.text_input(t_ui("Nom du permis", lang), value=st.session_state.get("permis", ""))
 st.session_state["permis"] = permis
 st.sidebar.caption("📁 Les données sont sauvegardées dans un fichier local (smc_dashboard.db). "
                     "Sur un hébergement éphémère (ex. cloud sans volume persistant), la base sera "
@@ -150,8 +162,20 @@ st.sidebar.caption("📁 Les données sont sauvegardées dans un fichier local (
                     "pour une persistance garantie.")
 st.sidebar.markdown("---")
 
+_current_state_for_notif = {k: st.session_state[k] for k in LIVE_KEYS if k != "permis"}
+_active_notifs = collect_notifications(_current_state_for_notif)
+_n_critical = sum(1 for n in _active_notifs if n["severite"] == "🔴 Critique")
+_n_attention = sum(1 for n in _active_notifs if n["severite"] == "⚠️ Attention")
+if _n_critical:
+    st.sidebar.error(f"🔴 {_n_critical} " + ("alerte(s) critique(s) — voir 🔔 Notifications" if lang == "FR" else "critical alert(s) — see 🔔 Notifications"))
+elif _n_attention:
+    st.sidebar.warning(f"⚠️ {_n_attention} " + ("alerte(s) — voir 🔔 Notifications" if lang == "FR" else "alert(s) — see 🔔 Notifications"))
+else:
+    st.sidebar.success("✅ Aucune alerte active" if lang == "FR" else "✅ No active alerts")
+st.sidebar.markdown("---")
+
 page = st.sidebar.radio(
-    "Navigation",
+    t_ui("Navigation", lang),
     ["📥 Import des données", "📋 Logs automatisés", "📐 Sections géologiques",
      "🗺️ Cartes (lithologie / structurale / anomalie)", "🧭 Graphiques structuraux",
      "🧊 Modèle 3D", "🛠️ Planification & Extension", "🎯 Simulation déviation",
@@ -161,8 +185,9 @@ page = st.sidebar.radio(
      "⚗️ Métallurgie", "🦺 Environnement & HSE", "📜 SOP", "🛡️ Admin", "🤖 Audit automatique des données",
      "📄 Rapport géologique", "🗄️ Documents", "💬 Commentaires & Réponses",
      "📐 Sections par orientation de forage", "🗃️ Base de données centrale", "📹 Réunion live",
-     "🛰️ Survey (déviomètre)",
+     "🛰️ Survey (déviomètre)", "🔔 Notifications", "📧 Envoi Email",
      "📊 Synthèse / Collars"],
+    format_func=lambda label: t_nav(label, lang),
 )
 
 st.sidebar.markdown("---")
@@ -1709,6 +1734,97 @@ elif page == "🛰️ Survey (déviomètre)":
                      "Ce déport reste dans une fourchette normale pour ce type de forage.") +
                     " Ces données de survey réelles doivent désormais remplacer les hypothèses utilisées "
                     "dans le Modèle 3D et les Sections par orientation pour ce trou.")
+
+elif page == "🔔 Notifications":
+    st.subheader("🔔 Centre de notifications")
+    st.write("Toutes les alertes actives détectées automatiquement pour le prospect "
+             f"**{prospect}**, à partir des données Admin, HSE, Échantillons, Planification et Audit.")
+
+    state_now = {k: st.session_state[k] for k in LIVE_KEYS if k != "permis"}
+    notifs = collect_notifications(state_now)
+    ndf = pd.DataFrame(notifs)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🔴 Critiques", int((ndf["severite"] == "🔴 Critique").sum()))
+    c2.metric("⚠️ Attention", int((ndf["severite"] == "⚠️ Attention").sum()))
+    c3.metric("Total", len(ndf))
+
+    for sev in ["🔴 Critique", "⚠️ Attention", "✅ OK"]:
+        sub = ndf[ndf["severite"] == sev]
+        if sub.empty:
+            continue
+        for _, r in sub.iterrows():
+            if sev == "🔴 Critique":
+                st.error(f"**[{r['categorie']}]** {r['message']}")
+            elif sev == "⚠️ Attention":
+                st.warning(f"**[{r['categorie']}]** {r['message']}")
+            else:
+                st.success(r["message"])
+
+    st.caption("Ce centre se recalcule automatiquement à chaque chargement de page — pas besoin de "
+               "bouton 'rafraîchir'. Il couvre : permis Admin expirés/à renouveler, incidents HSE "
+               "critiques non clôturés, échantillons rejetés, trous stoppés, et anomalies critiques "
+               "de qualité des données (RC/AC/DD).")
+
+elif page == "📧 Envoi Email":
+    st.subheader("📧 Envoi Email des rapports")
+    st.write("Envoie un document (par exemple le rapport géologique PDF généré dans l'onglet "
+             "'📄 Rapport géologique', ou tout document de l'onglet '🗄️ Documents') par email, via "
+             "**votre propre serveur SMTP** (Gmail, Outlook, ou celui de votre organisation).")
+    st.info("ℹ️ Je n'ai pas accès à un serveur mail — vous devez fournir les identifiants de VOTRE "
+            "compte d'envoi (ex. Gmail : utilisez un 'mot de passe d'application', pas votre mot de "
+            "passe principal). Rien n'est sauvegardé de façon persistante : ces identifiants restent "
+            "en mémoire le temps de la session.")
+
+    with st.form("email_config_form"):
+        st.markdown("**Configuration du serveur SMTP**")
+        c1, c2 = st.columns(2)
+        smtp_host = c1.text_input("Serveur SMTP", value="smtp.gmail.com",
+                                    help="Gmail: smtp.gmail.com · Outlook: smtp.office365.com")
+        smtp_port = c2.number_input("Port", value=587, step=1)
+        smtp_user = st.text_input("Votre adresse email (expéditeur)")
+        smtp_password = st.text_input("Mot de passe / mot de passe d'application", type="password")
+        st.markdown("**Message**")
+        dest = st.text_input("Destinataire(s) — séparés par des virgules")
+        subject = st.text_input("Sujet", value=f"Rapport géologique — {prospect}")
+        body = st.text_area("Message", value=f"Bonjour,\n\nVeuillez trouver ci-joint le rapport pour le prospect {prospect}.\n\nCordialement.")
+
+        doc_names = [d["Nom"] for d in st.session_state.documents]
+        attach_choice = st.selectbox("Pièce jointe (depuis l'onglet Documents)", ["Aucune"] + doc_names)
+
+        send = st.form_submit_button("📤 Envoyer l'email", type="primary")
+
+    if send:
+        if not (smtp_user and smtp_password and dest):
+            st.error("Champs requis manquants : email expéditeur, mot de passe, et destinataire(s).")
+        else:
+            try:
+                import smtplib
+                from email.mime.multipart import MIMEMultipart
+                from email.mime.text import MIMEText
+                from email.mime.application import MIMEApplication
+
+                msg = MIMEMultipart()
+                msg["From"] = smtp_user
+                msg["To"] = dest
+                msg["Subject"] = subject
+                msg.attach(MIMEText(body, "plain"))
+
+                if attach_choice != "Aucune":
+                    doc = next(d for d in st.session_state.documents if d["Nom"] == attach_choice)
+                    part = MIMEApplication(doc["Contenu"], Name=doc["Nom"])
+                    part["Content-Disposition"] = f'attachment; filename="{doc["Nom"]}"'
+                    msg.attach(part)
+
+                with smtplib.SMTP(smtp_host, int(smtp_port), timeout=20) as server:
+                    server.starttls()
+                    server.login(smtp_user, smtp_password)
+                    server.sendmail(smtp_user, [d.strip() for d in dest.split(",")], msg.as_string())
+                st.success(f"✅ Email envoyé à {dest}.")
+            except Exception as e:
+                st.error(f"Échec de l'envoi : {e}. Vérifiez le serveur/port, et pour Gmail assurez-vous "
+                         f"d'utiliser un 'mot de passe d'application' (pas le mot de passe du compte) — "
+                         f"activable dans les paramètres de sécurité Google.")
 
 elif page == "📊 Synthèse / Collars":
 
