@@ -15,6 +15,8 @@ from parsers import (
     generate_sampling_plan,
 )
 from pdf_report import build_pdf_report
+from printable_templates import (build_blank_section_pdf, build_blank_plan_map_pdf,
+                                   build_blank_daily_report_pdf, build_blank_attendance_sheet_pdf)
 import db
 from translations import t_nav, t_ui, DASHBOARD_TITLE, DASHBOARD_SUBTITLE
 from roster import ROLE_GROUPS
@@ -126,6 +128,36 @@ def safe_concat(keys):
     ValueError de pandas ('No objects to concatenate') quand rien n'est encore chargé."""
     dfs = [st.session_state.data[k] for k in keys if not st.session_state.data[k].empty]
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+
+def generic_upload_and_merge(session_key, target_cols, uploader_label="Fichier Excel/CSV", key_prefix=""):
+    """Widget réutilisable : upload d'un fichier Excel/CSV, mapping flexible de ses colonnes vers
+    un schéma cible, puis fusion dans st.session_state[session_key]. Utilisé pour ajouter l'upload
+    sur les onglets à tableau éditable (Planification, Échantillons, Métallurgie, HSE, Admin...)."""
+    with st.expander(f"📤 {uploader_label} — importer depuis un fichier"):
+        f_up = st.file_uploader("Fichier (xlsx/csv)", type=["xlsx", "csv"], key=f"{key_prefix}_uploader")
+        if f_up:
+            udf = pd.read_csv(f_up) if f_up.name.endswith(".csv") else pd.read_excel(f_up)
+            st.dataframe(udf.head(15), use_container_width=True)
+            cols = udf.columns.tolist()
+            st.caption("Associez chaque colonne cible à une colonne de votre fichier (laissez '—' si absente/non applicable).")
+            mapping = {}
+            map_cols = st.columns(3)
+            for i, tcol in enumerate(target_cols):
+                with map_cols[i % 3]:
+                    default_idx = (cols.index(tcol) + 1) if tcol in cols else 0
+                    choice = st.selectbox(tcol, ["—"] + cols, index=default_idx, key=f"{key_prefix}_map_{tcol}")
+                    if choice != "—":
+                        mapping[tcol] = choice
+            if st.button("📥 Importer et fusionner", key=f"{key_prefix}_import_btn", type="primary"):
+                imported = pd.DataFrame()
+                for tcol, scol in mapping.items():
+                    imported[tcol] = udf[scol]
+                st.session_state[session_key] = pd.concat(
+                    [st.session_state[session_key], imported], ignore_index=True)
+                st.success(f"{len(imported)} ligne(s) importée(s) et fusionnée(s).")
+                st.rerun()
+
 
 def _fresh_project_state():
     return {
@@ -862,6 +894,11 @@ elif page == "🛠️ Planification & Extension":
     st.write("Ajoutez, modifiez ou supprimez des lignes directement dans le tableau ci-dessous. "
              "Statut : **Planifié** (gris), **Foré** (bleu), **En cours** (vert), **Stoppé** (rouge).")
 
+    generic_upload_and_merge("planning", ["Trou_ID", "Type", "Ligne", "Easting", "Northing", "Elevation",
+                                            "Azimut", "Pendage", "Profondeur_prevue_m", "Statut",
+                                            "Cout_unitaire_par_m", "Commentaire"],
+                              "Programme de forage", key_prefix="planning")
+
     edited = st.data_editor(
         st.session_state.planning, num_rows="dynamic", use_container_width=True, key="planning_editor",
         column_config={
@@ -964,6 +1001,16 @@ elif page == "🎯 Simulation déviation":
 # ===========================================================================
 elif page == "🌱 Auger & Géochimie":
     st.subheader("🌱 Auger & Géochimie sols")
+
+    with st.expander("📤 Importer / recharger le fichier Log Géochimie Sols / Auger"):
+        f_auger_direct = st.file_uploader("Fichier Log Géochimie Sols / Auger (gabarit SMC)", type=["xlsx"], key="auger_direct_up")
+        if f_auger_direct and st.button("📥 Importer", key="auger_direct_import"):
+            new_auger = parse_auger_workbook(f_auger_direct.read())
+            st.session_state.data["AUGER"] = pd.concat(
+                [st.session_state.data["AUGER"], new_auger], ignore_index=True) if not st.session_state.data["AUGER"].empty else new_auger
+            st.success(f"{len(new_auger)} intervalle(s) importé(s).")
+            st.rerun()
+
     df = st.session_state.data["AUGER"]
     if df.empty:
         st.info("Aucune donnée Auger/Géochimie chargée.")
@@ -1057,6 +1104,16 @@ elif page == "💰 Estimation des teneurs":
 
 elif page == "🪨 SGI & Structures":
     st.subheader("🪨 Indice de qualité du massif (GSI) & synthèse structurale")
+
+    with st.expander("📤 Importer / recharger le fichier Log Structural"):
+        f_struct_direct = st.file_uploader("Fichier Log Structural (gabarit SMC)", type=["xlsx"], key="struct_direct_up")
+        if f_struct_direct and st.button("📥 Importer", key="struct_direct_import"):
+            new_struct = parse_structural_workbook(f_struct_direct.read())
+            st.session_state.data["STRUCT"] = pd.concat(
+                [st.session_state.data["STRUCT"], new_struct], ignore_index=True) if not st.session_state.data["STRUCT"].empty else new_struct
+            st.success(f"{len(new_struct)} mesure(s) importée(s).")
+            st.rerun()
+
     sdf = st.session_state.data["STRUCT"]
     auger = st.session_state.data["AUGER"]
     all_df = safe_concat(["RC", "AC", "DD"])
@@ -1349,6 +1406,11 @@ elif page == "🔗 Gestion des échantillons":
     st.write("Suivi de la chaîne de traçabilité des échantillons, du prélèvement terrain à la réception des "
              "résultats du laboratoire. Inclut les échantillons QAQC (blancs, duplicatas, standards).")
 
+    generic_upload_and_merge("samples", ["Echantillon_ID", "Sondage", "From", "To", "Type",
+                                           "Date_prelevement", "Preleve_par", "Date_envoi_labo",
+                                           "Laboratoire", "Date_reception_resultats", "Statut", "QAQC", "Commentaire"],
+                              "Échantillons", key_prefix="samples")
+
     edited_samples = st.data_editor(
         st.session_state.samples, num_rows="dynamic", use_container_width=True, key="samples_editor",
         column_config={
@@ -1384,6 +1446,10 @@ elif page == "🔗 Gestion des échantillons":
 
 elif page == "⚗️ Métallurgie":
     st.subheader("⚗️ Métallurgie — essais de traitement")
+    generic_upload_and_merge("metallurgie", ["Test_ID", "Sondage", "Type_essai", "Tete_g_t",
+                                               "Recuperation_pct", "Residu_g_t", "Reactif",
+                                               "Consommation_kg_t", "Granulometrie_P80_um", "Commentaire"],
+                              "Essais métallurgiques", key_prefix="metal")
     edited = st.data_editor(st.session_state.metallurgie, num_rows="dynamic", use_container_width=True, key="metal_editor")
     st.session_state.metallurgie = edited
     if not edited.empty and edited["Recuperation_pct"].notna().any():
@@ -1403,6 +1469,9 @@ elif page == "⚗️ Métallurgie":
 
 elif page == "🦺 Environnement & HSE":
     st.subheader("🦺 Environnement, Santé & Sécurité (HSE)")
+    generic_upload_and_merge("hse", ["Date", "Type", "Description", "Lieu", "Gravite", "Statut",
+                                       "Responsable", "Actions_correctives"],
+                              "Événements HSE", key_prefix="hse")
     edited = st.data_editor(
         st.session_state.hse, num_rows="dynamic", use_container_width=True, key="hse_editor",
         column_config={
@@ -1467,6 +1536,9 @@ elif page == "📜 SOP":
 elif page == "🛡️ Admin":
     st.subheader("🛡️ Administration du projet minier")
     st.write("Suivi administratif : permis, autorisations, contrats, conformité réglementaire, échéances.")
+    generic_upload_and_merge("admin", ["Categorie", "Element", "Reference", "Date_emission",
+                                         "Date_expiration", "Statut", "Commentaire"],
+                              "Éléments administratifs", key_prefix="admin")
     edited = st.data_editor(
         st.session_state.admin, num_rows="dynamic", use_container_width=True, key="admin_editor",
         column_config={
@@ -2464,42 +2536,77 @@ elif page == "🌍 Géomatique":
                 "géologiques, tracés de routes/rivières exportés depuis QGIS/ArcGIS (Export → GeoJSON).")
 
 elif page == "📑 Modèles Excel":
-    st.subheader("📑 Modèles Excel vierges")
-    st.write("Téléchargez des gabarits vierges (même structure que celle attendue par l'onglet Import) "
-             "pour la saisie terrain ou l'onboarding de nouveaux géologues.")
+    st.subheader("📑 Modèles & Templates")
+    tab_excel, tab_print = st.tabs(["📊 Modèles Excel (import de données)", "🖨️ Modèles à imprimer (papier terrain)"])
 
-    def _blank_template(sheets_cols):
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            for sheet_name, cols in sheets_cols.items():
-                pd.DataFrame(columns=cols).to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-        buf.seek(0)
-        return buf.getvalue()
+    with tab_excel:
+        st.write("Téléchargez des gabarits vierges (même structure que celle attendue par l'onglet Import) "
+                 "pour la saisie terrain ou l'onboarding de nouveaux géologues.")
 
-    templates = {
-        "Modèle Log RC/AC/DD": {
-            "Geologie": ["Easting_manuel", "Northing_manuel", "Elevation_manuel", "Easting_repiquage",
-                         "Northing_repiquage", "Elevation_repiquage", "Sondage", "From", "To", "Priorite",
-                         "Lithologie", "Code_Litho", "Couleur", "Grain", "Texture", "Oxydation", "Magn",
-                         "Durete", "Contact", "Code_Strat", "Formation", "Age", "Type_Ech"],
-            "W": ["From", "To", "Weathering_1", "Weathering_2"],
-            "M": ["From", "To", "Sulf_code1", "Pct1", "Sulf_code2", "Pct2", "Sulf_code3", "Pct3", "Auto"],
-            "Al": ["From", "To", "Alteration_type", "Intensite"],
-        },
-        "Modèle Log Auger / Géochimie sols": {
-            "Logs_Sols": ["Easting", "Northing", "Elevation", "Sondage", "From", "To", "Interval_m",
-                          "Litho_Code", "Lithologie", "Code_Strat", "Formation", "Horizon_Sol", "Couleur",
-                          "Texture", "Echant_ID", "Labo_Au_ppb"],
-        },
-        "Modèle Log Structural": {
-            "Logs_Geotechniques": ["Easting_repiquage", "Northing_repiquage", "Elevation_repiquage",
-                                    "Sondage", "From_m", "To_m", "Azimut", "Pendage", "OCTypes",
-                                    "GSI_auto", "RQD_auto"],
-        },
-    }
-    for name, sheets in templates.items():
-        st.download_button(f"📥 {name}", _blank_template(sheets), f"{name.replace(' ', '_')}.xlsx",
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"tpl_{name}")
+        def _blank_template(sheets_cols):
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                for sheet_name, cols in sheets_cols.items():
+                    pd.DataFrame(columns=cols).to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+            buf.seek(0)
+            return buf.getvalue()
+
+        templates = {
+            "Modèle Log RC/AC/DD": {
+                "Geologie": ["Easting_manuel", "Northing_manuel", "Elevation_manuel", "Easting_repiquage",
+                             "Northing_repiquage", "Elevation_repiquage", "Sondage", "From", "To", "Priorite",
+                             "Lithologie", "Code_Litho", "Couleur", "Grain", "Texture", "Oxydation", "Magn",
+                             "Durete", "Contact", "Code_Strat", "Formation", "Age", "Type_Ech"],
+                "W": ["From", "To", "Weathering_1", "Weathering_2"],
+                "M": ["From", "To", "Sulf_code1", "Pct1", "Sulf_code2", "Pct2", "Sulf_code3", "Pct3", "Auto"],
+                "Al": ["From", "To", "Alteration_type", "Intensite"],
+            },
+            "Modèle Log Auger / Géochimie sols": {
+                "Logs_Sols": ["Easting", "Northing", "Elevation", "Sondage", "From", "To", "Interval_m",
+                              "Litho_Code", "Lithologie", "Code_Strat", "Formation", "Horizon_Sol", "Couleur",
+                              "Texture", "Echant_ID", "Labo_Au_ppb"],
+            },
+            "Modèle Log Structural": {
+                "Logs_Geotechniques": ["Easting_repiquage", "Northing_repiquage", "Elevation_repiquage",
+                                        "Sondage", "From_m", "To_m", "Azimut", "Pendage", "OCTypes",
+                                        "GSI_auto", "RQD_auto"],
+            },
+        }
+        for name, sheets in templates.items():
+            st.download_button(f"📥 {name}", _blank_template(sheets), f"{name.replace(' ', '_')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"tpl_{name}")
+
+    with tab_print:
+        st.write("Gabarits **vierges au format PDF**, prêts à imprimer pour le terrain — à remplir "
+                 "à la main quand l'ordinateur/tablette n'est pas pratique (forage, brousse, etc.).")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("#### 📐 Section géologique vierge")
+            st.caption("Grille millimétrée + cartouche (prospect, section, échelle) + légende — pour "
+                       "dessiner une coupe à la main.")
+            st.download_button("📥 Télécharger (PDF, A4 paysage)",
+                                build_blank_section_pdf(prospect, permis),
+                                "section_geologique_vierge.pdf", "application/pdf", key="pdf_section")
+
+            st.markdown("#### 📄 Rapport journalier vierge")
+            st.caption("Cartouche + sections Activités/Avancement/Échantillons/Problèmes/Recommandations "
+                       "+ signatures.")
+            st.download_button("📥 Télécharger (PDF, A4 portrait)",
+                                build_blank_daily_report_pdf(prospect, permis),
+                                "rapport_journalier_vierge.pdf", "application/pdf", key="pdf_rapport")
+        with c2:
+            st.markdown("#### 🗺️ Plan de position vierge")
+            st.caption("Grille + rose des vents + échelle graphique — pour reporter des positions de "
+                       "trous ou d'affleurements à la main.")
+            st.download_button("📥 Télécharger (PDF, A4 portrait)",
+                                build_blank_plan_map_pdf(prospect, permis),
+                                "plan_position_vierge.pdf", "application/pdf", key="pdf_plan")
+
+            st.markdown("#### ✅ Feuille de présence vierge")
+            st.caption("Tableau Nom/Fonction/jours de la semaine/signature — pour le suivi RH terrain.")
+            st.download_button("📥 Télécharger (PDF, A4 paysage)",
+                                build_blank_attendance_sheet_pdf(prospect, permis),
+                                "feuille_presence_vierge.pdf", "application/pdf", key="pdf_presence")
 
 elif page == "🧪 Plan d'échantillonnage (QAQC)":
     st.subheader("🧪 Plan d'échantillonnage & Conditionnement (QAQC)")
