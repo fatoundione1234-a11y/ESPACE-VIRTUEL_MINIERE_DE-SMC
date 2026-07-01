@@ -15,7 +15,7 @@ ROLE_GROUPS = [
     ("Admin", ["Makhan Soumaré", "Assane Sow", "Kénié Cissokho", "Maimouna Diallo"]),
     ("Géologue de terrain", ["Modou Mbengue", "Moustapha Lo",
         "Moustapha Ndoye", "Amalakh Traoré", "Amadou", "Mame Penda", "Diya Diakhaté", "Nany Rose",
-        "Assane Niass", "Sahir", "Mansour Ndiaye", "Abdoulaye"]),
+        "Assane Niass", "Sahir", "Mansour Ndiaye", "Abdoulaye", "Samba Mballo"]),
     ("Technicien géologue", ["Abdou Diouf", "Aliou Faye"]),
     ("HSE", ["Augustin", "Aminata Diop", "Alsane Gano", "Ramatoulaye Nguéré"]),
 ]
