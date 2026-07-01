@@ -16,9 +16,65 @@ from parsers import (
 from pdf_report import build_pdf_report
 import db
 from translations import t_nav, t_ui, DASHBOARD_TITLE, DASHBOARD_SUBTITLE
+from roster import ROLE_GROUPS
 
 st.set_page_config(page_title="ESPACE VIRTUELLE MINIÈRE DE SMC", layout="wide", page_icon="⛏️")
 db.init_db()
+db.init_users_table()
+
+# ===========================================================================
+# AUTHENTIFICATION — porte d'entrée obligatoire avant d'accéder au dashboard
+# ===========================================================================
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None
+
+if st.session_state.auth_user is None:
+    st.markdown("""
+    <div style="background:linear-gradient(90deg,#1B2631,#283747);padding:24px 30px;border-radius:10px;margin-bottom:20px;">
+      <h1 style="color:#F4D03F;margin:0;font-size:30px;">⛏️ ESPACE VIRTUELLE MINIÈRE DE SMC</h1>
+      <p style="color:#D6DBDF;margin:6px 0 0 0;font-size:15px;">Connexion requise</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if db.user_count() == 0:
+        st.warning("⚙️ Aucun compte n'existe encore. Initialisez les comptes de l'équipe (une seule fois).")
+        if st.button("🚀 Créer tous les comptes de l'équipe (+ 1 compte administrateur)", type="primary"):
+            created = []
+            for role, names in ROLE_GROUPS:
+                for name in names:
+                    u, p = db.create_user(name, role)
+                    created.append({"Nom": name, "Rôle": role, "Identifiant": u, "Mot de passe initial": p})
+            admin_u, admin_p = db.create_user("Administrateur SMC", "Administrateur", username="admin")
+            created.append({"Nom": "Administrateur SMC", "Rôle": "Administrateur", "Identifiant": admin_u, "Mot de passe initial": admin_p})
+            st.session_state["_just_created_accounts"] = created
+            st.rerun()
+
+        just_created = st.session_state.get("_just_created_accounts")
+        if just_created:
+            st.success(f"{len(just_created)} comptes créés ! ⚠️ Notez/téléchargez cette liste MAINTENANT — "
+                       "les mots de passe en clair ne seront plus jamais réaffichés ensuite.")
+            cdf = pd.DataFrame(just_created)
+            st.dataframe(cdf, use_container_width=True, height=400)
+            st.download_button("📥 Télécharger la liste (CSV) — à distribuer de façon sécurisée",
+                                cdf.to_csv(index=False).encode("utf-8"), "comptes_smc_dashboard.csv", "text/csv")
+            st.info("Chaque personne devra changer son mot de passe à sa première connexion (onglet "
+                    "'Mon compte' une fois connecté).")
+        st.stop()
+
+    st.subheader("🔐 Connexion")
+    with st.form("login_form"):
+        login_user = st.text_input("Identifiant")
+        login_pwd = st.text_input("Mot de passe", type="password")
+        submitted = st.form_submit_button("Se connecter", type="primary")
+    if submitted:
+        result = db.verify_user(login_user.strip(), login_pwd)
+        if result:
+            st.session_state.auth_user = result
+            st.rerun()
+        else:
+            st.error("Identifiant ou mot de passe incorrect.")
+    st.caption("Vous n'avez pas de compte ? Contactez votre chef de projet ou l'administrateur du dashboard.")
+    st.stop()
 
 
 def safe_concat(keys):
@@ -97,6 +153,13 @@ if "active_project" not in st.session_state:
         existing = ["Prospect ND"]
     st.session_state.active_project = existing[0]
     _load_project(st.session_state.active_project)
+
+st.sidebar.markdown(f"### 👤 {st.session_state.auth_user['full_name']}")
+st.sidebar.caption(f"Rôle : {st.session_state.auth_user['role']} · Identifiant : {st.session_state.auth_user['username']}")
+if st.sidebar.button("🚪 Se déconnecter"):
+    st.session_state.auth_user = None
+    st.rerun()
+st.sidebar.markdown("---")
 
 if "lang" not in st.session_state:
     st.session_state.lang = "FR"
@@ -186,6 +249,7 @@ page = st.sidebar.radio(
      "📄 Rapport géologique", "🗄️ Documents", "💬 Commentaires & Réponses",
      "📐 Sections par orientation de forage", "🗃️ Base de données centrale", "📹 Réunion live",
      "🛰️ Survey (déviomètre)", "🔔 Notifications", "📧 Envoi Email",
+     "👤 Utilisateurs", "🔑 Mon compte",
      "📊 Synthèse / Collars"],
     format_func=lambda label: t_nav(label, lang),
 )
@@ -1825,6 +1889,71 @@ elif page == "📧 Envoi Email":
                 st.error(f"Échec de l'envoi : {e}. Vérifiez le serveur/port, et pour Gmail assurez-vous "
                          f"d'utiliser un 'mot de passe d'application' (pas le mot de passe du compte) — "
                          f"activable dans les paramètres de sécurité Google.")
+
+elif page == "👤 Utilisateurs":
+    st.subheader("👤 Gestion des utilisateurs")
+    is_admin = st.session_state.auth_user["role"] in ("Administrateur", "Manageur", "Chef de projet")
+    if not is_admin:
+        st.warning("Cette page est réservée aux rôles Administrateur / Manageur / Chef de projet. "
+                   "Vous pouvez tout de même consulter la liste ci-dessous.")
+
+    users = db.list_users()
+    udf = pd.DataFrame(users)
+    st.markdown(f"#### 📋 Comptes existants ({len(users)})")
+    st.dataframe(udf, use_container_width=True, height=350)
+
+    if is_admin:
+        st.markdown("---")
+        st.markdown("#### ➕ Créer un compte individuel")
+        with st.form("create_user_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            new_full_name = c1.text_input("Nom complet")
+            new_role = c2.text_input("Rôle", value="Géologue de terrain")
+            create_submit = st.form_submit_button("Créer le compte")
+        if create_submit and new_full_name:
+            u, p = db.create_user(new_full_name, new_role)
+            st.success(f"Compte créé : identifiant **{u}**, mot de passe initial **{p}** "
+                       f"— communiquez-le immédiatement à {new_full_name}, il ne sera plus réaffiché.")
+
+        st.markdown("---")
+        st.markdown("#### 🔄 Réinitialiser un mot de passe")
+        target_user = st.selectbox("Compte", [u["username"] for u in users], key="reset_target")
+        if st.button("Réinitialiser le mot de passe"):
+            new_pwd = db.reset_password(target_user)
+            st.success(f"Nouveau mot de passe pour **{target_user}** : **{new_pwd}** — à communiquer immédiatement.")
+
+        st.markdown("---")
+        st.markdown("#### 🗑️ Supprimer un compte")
+        del_user = st.selectbox("Compte à supprimer", [u["username"] for u in users], key="del_target")
+        if st.button("Supprimer ce compte", type="secondary"):
+            if del_user == st.session_state.auth_user["username"]:
+                st.error("Vous ne pouvez pas supprimer votre propre compte pendant que vous êtes connecté avec.")
+            else:
+                db.delete_user(del_user)
+                st.success(f"Compte {del_user} supprimé.")
+                st.rerun()
+
+elif page == "🔑 Mon compte":
+    st.subheader("🔑 Mon compte")
+    u = st.session_state.auth_user
+    st.write(f"**Nom :** {u['full_name']}  \n**Identifiant :** {u['username']}  \n**Rôle :** {u['role']}")
+    st.markdown("---")
+    st.markdown("#### Changer mon mot de passe")
+    with st.form("change_pwd_form"):
+        old_pwd = st.text_input("Mot de passe actuel", type="password")
+        new_pwd1 = st.text_input("Nouveau mot de passe", type="password")
+        new_pwd2 = st.text_input("Confirmer le nouveau mot de passe", type="password")
+        change_submit = st.form_submit_button("Mettre à jour le mot de passe")
+    if change_submit:
+        if not db.verify_user(u["username"], old_pwd):
+            st.error("Mot de passe actuel incorrect.")
+        elif new_pwd1 != new_pwd2:
+            st.error("Les deux nouveaux mots de passe ne correspondent pas.")
+        elif len(new_pwd1) < 6:
+            st.error("Le nouveau mot de passe doit faire au moins 6 caractères.")
+        else:
+            db.change_password(u["username"], new_pwd1)
+            st.success("Mot de passe mis à jour avec succès.")
 
 elif page == "📊 Synthèse / Collars":
 
