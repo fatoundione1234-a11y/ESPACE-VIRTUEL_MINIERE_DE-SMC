@@ -74,6 +74,25 @@ if st.session_state.auth_user is None:
         else:
             st.error("Identifiant ou mot de passe incorrect.")
     st.caption("Vous n'avez pas de compte ? Contactez votre chef de projet ou l'administrateur du dashboard.")
+
+    RECOVERY_CODE = "SMC-RESET-2026"
+    with st.expander("🆘 Comptes perdus / mot de passe administrateur oublié ?"):
+        st.write("Si personne n'a plus accès à aucun compte, utilisez le code de récupération d'urgence "
+                 "(communiqué séparément, à garder confidentiel) pour recréer un compte administrateur.")
+        rec_code = st.text_input("Code de récupération", type="password", key="recovery_code_input")
+        if st.button("Recréer un compte administrateur"):
+            if rec_code == RECOVERY_CODE:
+                existing_admin = any(u["username"] == "admin" for u in db.list_users())
+                if existing_admin:
+                    new_pwd = db.reset_password("admin")
+                    st.success(f"Mot de passe du compte **admin** réinitialisé : **{new_pwd}** "
+                               f"— notez-le immédiatement, connectez-vous puis changez-le dans 'Mon compte'.")
+                else:
+                    u, p = db.create_user("Administrateur SMC", "Administrateur", username="admin_recovery")
+                    st.success(f"Nouveau compte administrateur créé : identifiant **{u}**, "
+                               f"mot de passe **{p}** — notez-le immédiatement.")
+            else:
+                st.error("Code de récupération incorrect.")
     st.stop()
 
 
