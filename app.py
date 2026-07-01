@@ -79,6 +79,16 @@ if st.session_state.auth_user is None:
             st.error("Identifiant ou mot de passe incorrect.")
     st.caption("Vous n'avez pas de compte ? Contactez votre chef de projet ou l'administrateur du dashboard.")
 
+    recovery_result = st.session_state.get("_recovery_result")
+    if recovery_result:
+        st.success(recovery_result)
+        st.warning("⚠️ Notez bien cet identifiant et ce mot de passe MAINTENANT avant de continuer — "
+                   "ils ne seront plus jamais réaffichés.")
+        if st.button("✅ J'ai bien noté ces identifiants — continuer"):
+            del st.session_state["_recovery_result"]
+            st.rerun()
+        st.stop()
+
     RECOVERY_CODE = "SMC-RESET-2026"
     with st.expander("🆘 Comptes perdus / mot de passe administrateur oublié ?"):
         st.write("Si personne n'a plus accès à aucun compte, utilisez le code de récupération d'urgence "
@@ -89,12 +99,17 @@ if st.session_state.auth_user is None:
                 existing_admin = any(u["username"] == "admin" for u in db.list_users())
                 if existing_admin:
                     new_pwd = db.reset_password("admin")
-                    st.success(f"Mot de passe du compte **admin** réinitialisé : **{new_pwd}** "
-                               f"— notez-le immédiatement, connectez-vous puis changez-le dans 'Mon compte'.")
+                    st.session_state["_recovery_result"] = (
+                        f"Mot de passe du compte **admin** réinitialisé.  \n"
+                        f"**Identifiant : admin**  \n**Nouveau mot de passe : {new_pwd}**"
+                    )
                 else:
                     u, p = db.create_user("Administrateur SMC", "Administrateur", username="admin_recovery")
-                    st.success(f"Nouveau compte administrateur créé : identifiant **{u}**, "
-                               f"mot de passe **{p}** — notez-le immédiatement.")
+                    st.session_state["_recovery_result"] = (
+                        f"Nouveau compte administrateur créé.  \n"
+                        f"**Identifiant : {u}**  \n**Mot de passe : {p}**"
+                    )
+                st.rerun()
             else:
                 st.error("Code de récupération incorrect.")
     st.stop()
