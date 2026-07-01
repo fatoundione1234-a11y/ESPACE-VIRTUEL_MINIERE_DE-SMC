@@ -18,4 +18,6 @@ ROLE_GROUPS = [
         "Assane Niass", "Sahir", "Mansour Ndiaye", "Abdoulaye", "Samba Mballo"]),
     ("Technicien géologue", ["Abdou Diouf", "Aliou Faye"]),
     ("HSE", ["Augustin", "Aminata Diop", "Alsane Gano", "Ramatoulaye Nguéré"]),
+    ("Topographe", ["Aziz Niang"]),
+    ("Géomaticien", ["Lucien Colly Ndiaye"]),
 ]
