@@ -768,6 +768,40 @@ def ordinary_kriging(easting, northing, values, grid_e, grid_n, variogram_params
     return np.array(estimates), np.array(kriging_std)
 
 
+def generate_sampling_plan(hole_id, prospect, from_depth, to_depth, interval=1.0,
+                            qaqc_every_m=20, qaqc_pattern=("BLK", "STD", "DUP")):
+    """Génère automatiquement un plan d'échantillonnage terrain (conditionnement RC/AC/DD) :
+    un échantillon normal tous les `interval` mètres, avec insertion automatique d'un
+    échantillon QAQC (blanc/standard/duplicata, en rotation) tous les `qaqc_every_m` mètres de
+    profondeur cumulée — reproduit la pratique terrain illustrée par les fiches de conditionnement
+    papier (blancs/standards insérés à intervalle régulier de profondeur)."""
+    rows = []
+    depth = from_depth
+    cum_since_qaqc = 0.0
+    qaqc_idx = 0
+    sample_num = 1
+    while depth < to_depth:
+        seg_to = min(depth + interval, to_depth)
+        rows.append({
+            "Prospect": prospect, "HoleID": hole_id, "SampleID": f"{hole_id}-{sample_num:04d}",
+            "S_Type": "Normal", "Std_ID": "", "From_m": round(depth, 2), "To_m": round(seg_to, 2),
+        })
+        sample_num += 1
+        cum_since_qaqc += (seg_to - depth)
+        depth = seg_to
+        if cum_since_qaqc >= qaqc_every_m and depth < to_depth:
+            qaqc_type = qaqc_pattern[qaqc_idx % len(qaqc_pattern)]
+            rows.append({
+                "Prospect": prospect, "HoleID": hole_id, "SampleID": f"{hole_id}-{sample_num:04d}",
+                "S_Type": qaqc_type, "Std_ID": f"STD-{qaqc_idx+1}" if qaqc_type == "STD" else "",
+                "From_m": round(depth, 2), "To_m": round(depth, 2),
+            })
+            sample_num += 1
+            qaqc_idx += 1
+            cum_since_qaqc = 0.0
+    return pd.DataFrame(rows)
+
+
 def collar_table(df, depth_col_candidates=("To", "To_m")):
     """Construit une table des collars (1 ligne par trou) : easting, northing, elevation,
     profondeur totale, type de forage."""

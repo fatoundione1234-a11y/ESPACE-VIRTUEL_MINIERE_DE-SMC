@@ -12,6 +12,7 @@ from parsers import (
     hole_trajectory, length_weighted_grade, audit_dataframe, auto_fix_dataframe,
     generate_geological_report, report_to_markdown, parse_survey_dataframe, build_survey_trajectory,
     collect_notifications, utm_to_latlon, experimental_variogram, fit_spherical_variogram, ordinary_kriging,
+    generate_sampling_plan,
 )
 from pdf_report import build_pdf_report
 import db
@@ -160,12 +161,16 @@ def _fresh_project_state():
         "documents": [],
         "comments": [],
         "meetings": [],
+        "sampling_plan": pd.DataFrame(columns=[
+            "Prospect", "HoleID", "SampleID", "S_Type", "Std_ID", "From_m", "To_m",
+            "S_Weight_kg", "Total_Weight_kg", "Water", "Sampler", "Shift", "Date", "Comment",
+        ]),
         "permis": "",
     }
 
 
 LIVE_KEYS = ["data", "litho_colors", "planning", "budget", "samples", "metallurgie", "hse", "admin",
-             "documents", "comments", "meetings", "permis"]
+             "documents", "comments", "meetings", "sampling_plan", "permis"]
 
 
 def _save_active_to_db():
@@ -294,6 +299,7 @@ page = st.sidebar.radio(
      "👤 Utilisateurs", "🔑 Mon compte",
      "🗺️ Carte interactive", "📈 KPIs exécutif", "🎓 Formation / Guide",
      "🔗 API Laboratoire", "🤖 Assistant IA", "🎨 Apparence", "⛰️ Topographie", "🌍 Géomatique", "📑 Modèles Excel",
+     "🧪 Plan d'échantillonnage (QAQC)",
      "📊 Synthèse / Collars"],
     format_func=lambda label: t_nav(label, lang),
 )
@@ -2494,6 +2500,123 @@ elif page == "📑 Modèles Excel":
     for name, sheets in templates.items():
         st.download_button(f"📥 {name}", _blank_template(sheets), f"{name.replace(' ', '_')}.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"tpl_{name}")
+
+elif page == "🧪 Plan d'échantillonnage (QAQC)":
+    st.subheader("🧪 Plan d'échantillonnage & Conditionnement (QAQC)")
+    st.write("Digitalise le conditionnement terrain (comme vos fiches papier RC/AC/DD) : saisie en "
+             "temps réel partagée entre techniciens et géologues, génération automatique du plan "
+             "QAQC (blancs/standards/duplicatas insérés à intervalle régulier de profondeur), et "
+             "upload Excel pour digitaliser vos fiches existantes.")
+
+    tab_auto, tab_saisie, tab_upload = st.tabs(
+        ["🤖 Génération automatique", "📋 Saisie terrain (temps réel)", "📤 Upload Excel"])
+
+    # ---------------- GÉNÉRATION AUTOMATIQUE ----------------
+    with tab_auto:
+        st.write("Génère automatiquement la séquence d'échantillons pour un trou, avec insertion "
+                 "des QAQC selon vos règles.")
+        c1, c2, c3 = st.columns(3)
+        gen_hole = c1.text_input("N° du trou", value="KWRC26-0345")
+        gen_prospect = c2.text_input("Prospect", value=prospect)
+        gen_interval = c3.number_input("Longueur d'échantillon (m)", 0.5, 10.0, 1.0, 0.5)
+        c4, c5, c6 = st.columns(3)
+        gen_from = c4.number_input("Profondeur de départ (m)", 0.0, 2000.0, 0.0, 1.0)
+        gen_to = c5.number_input("Profondeur de fin (m)", 0.0, 2000.0, 100.0, 1.0)
+        gen_qaqc_every = c6.number_input("QAQC tous les combien de mètres", 5.0, 200.0, 20.0, 5.0,
+                                          help="Un échantillon de contrôle (blanc/standard/duplicata) "
+                                               "sera inséré automatiquement à chaque multiple de cette distance.")
+        pattern_choice = st.multiselect("Rotation des types QAQC insérés (dans l'ordre)",
+                                         ["BLK", "STD", "DUP"], default=["BLK", "STD", "DUP"])
+
+        if st.button("⚙️ Générer le plan", type="primary"):
+            if gen_to <= gen_from:
+                st.error("La profondeur de fin doit être supérieure à la profondeur de départ.")
+            elif not pattern_choice:
+                st.error("Sélectionnez au moins un type QAQC pour la rotation.")
+            else:
+                plan = generate_sampling_plan(gen_hole, gen_prospect, gen_from, gen_to,
+                                               interval=gen_interval, qaqc_every_m=gen_qaqc_every,
+                                               qaqc_pattern=tuple(pattern_choice))
+                st.session_state["_generated_plan"] = plan
+
+        gen_plan = st.session_state.get("_generated_plan")
+        if gen_plan is not None and not gen_plan.empty:
+            n_qaqc = int((gen_plan["S_Type"] != "Normal").sum())
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Échantillons totaux", len(gen_plan))
+            c2.metric("Échantillons QAQC", n_qaqc)
+            c3.metric("Taux QAQC", f"{n_qaqc / len(gen_plan) * 100:.1f}%")
+            st.dataframe(gen_plan, use_container_width=True, height=400)
+            st.download_button("📥 Télécharger ce plan (CSV)", gen_plan.to_csv(index=False).encode("utf-8"),
+                                f"plan_echantillonnage_{gen_hole}.csv", "text/csv")
+            if st.button("➕ Ajouter ce plan au suivi terrain partagé"):
+                st.session_state.sampling_plan = pd.concat(
+                    [st.session_state.sampling_plan, gen_plan.rename(columns={})], ignore_index=True)
+                st.success(f"{len(gen_plan)} lignes ajoutées au suivi terrain (onglet 'Saisie terrain').")
+            st.info(f"🧠 Avec un intervalle QAQC de {gen_qaqc_every} m, le taux d'échantillons de "
+                    f"contrôle est de **{n_qaqc / len(gen_plan) * 100:.1f}%** — la pratique standard "
+                    f"recommande un minimum de 5-10%. " +
+                    ("✅ Conforme aux bonnes pratiques." if n_qaqc / len(gen_plan) >= 0.05 else
+                     "⚠️ En dessous du minimum recommandé — envisagez de resserrer l'intervalle."))
+
+    # ---------------- SAISIE TERRAIN TEMPS RÉEL ----------------
+    with tab_saisie:
+        st.write("Ce tableau est **partagé en temps réel** entre tous les utilisateurs connectés à ce "
+                 "prospect (techniciens sur le terrain, géologues au bureau) — toute modification est "
+                 "visible par tous après actualisation de la page.")
+        edited_plan = st.data_editor(
+            st.session_state.sampling_plan, num_rows="dynamic", use_container_width=True,
+            key="sampling_plan_editor", height=450,
+            column_config={
+                "S_Type": st.column_config.SelectboxColumn(options=["Normal", "STD", "BLK", "DUP"]),
+                "Shift": st.column_config.SelectboxColumn(options=["Jour", "Nuit"]),
+            },
+        )
+        st.session_state.sampling_plan = edited_plan
+
+        if not edited_plan.empty:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total échantillons", len(edited_plan))
+            n_qaqc2 = int((edited_plan["S_Type"] != "Normal").sum()) if "S_Type" in edited_plan.columns else 0
+            c2.metric("Échantillons QAQC", n_qaqc2)
+            c3.metric("Trous suivis", edited_plan["HoleID"].nunique() if "HoleID" in edited_plan.columns else 0)
+            c4.metric("Taux QAQC", f"{n_qaqc2/len(edited_plan)*100:.1f}%" if len(edited_plan) else "0%")
+
+            by_hole = edited_plan.groupby("HoleID").size().reset_index(name="N_echantillons") if "HoleID" in edited_plan.columns else pd.DataFrame()
+            if not by_hole.empty:
+                fig = go.Figure(go.Bar(x=by_hole["HoleID"], y=by_hole["N_echantillons"], marker_color="#1B4F72"))
+                fig.update_layout(title="Échantillons conditionnés par trou", height=350)
+                st.plotly_chart(fig, use_container_width=True)
+
+    # ---------------- UPLOAD EXCEL ----------------
+    with tab_upload:
+        st.write("Digitalisez vos fiches de conditionnement existantes : uploadez un Excel/CSV, "
+                 "associez les colonnes, et intégrez-les au suivi terrain partagé.")
+        f_cond = st.file_uploader("Fichier de conditionnement (xlsx/csv)", type=["xlsx", "csv"], key="cond_up")
+        if f_cond:
+            cdf = pd.read_csv(f_cond) if f_cond.name.endswith(".csv") else pd.read_excel(f_cond)
+            st.dataframe(cdf.head(20), use_container_width=True)
+            cols = cdf.columns.tolist()
+            target_cols = ["Prospect", "HoleID", "SampleID", "S_Type", "Std_ID", "From_m", "To_m",
+                            "S_Weight_kg", "Total_Weight_kg", "Water", "Sampler", "Shift", "Date", "Comment"]
+            st.write("Associez chaque colonne cible à une colonne de votre fichier (laissez '—' si absente) :")
+            mapping = {}
+            map_cols = st.columns(4)
+            for i, tcol in enumerate(target_cols):
+                with map_cols[i % 4]:
+                    choice = st.selectbox(tcol, ["—"] + cols, key=f"map_{tcol}",
+                                           index=(cols.index(tcol) + 1) if tcol in cols else 0)
+                    if choice != "—":
+                        mapping[tcol] = choice
+            if st.button("📥 Importer et fusionner au suivi terrain", type="primary"):
+                imported = pd.DataFrame()
+                for tcol, scol in mapping.items():
+                    imported[tcol] = cdf[scol]
+                st.session_state.sampling_plan = pd.concat(
+                    [st.session_state.sampling_plan, imported], ignore_index=True)
+                st.success(f"{len(imported)} ligne(s) importée(s) et fusionnée(s) au suivi terrain partagé.")
+        else:
+            st.info("Aucun fichier chargé.")
 
 elif page == "📊 Synthèse / Collars":
 
